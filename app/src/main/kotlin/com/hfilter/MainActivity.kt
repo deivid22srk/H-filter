@@ -10,6 +10,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.foundation.lazy.LazyColumn
@@ -70,7 +72,11 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch(Dispatchers.IO) {
             hostManager.loadFromCache()
             if (settingsManager.autoUpdate.first()) {
-                hostManager.reload(settingsManager.hostSources.first(), settingsManager.appPredefinitions.first())
+                hostManager.reload(
+                    settingsManager.hostSources.first(),
+                    settingsManager.appPredefinitions.first(),
+                    settingsManager.filteringMode.first()
+                )
             }
         }
 
@@ -216,11 +222,12 @@ fun MainApp(
                 0 -> HomeScreen(hostManager, vpnActive, onVpnToggle, onShowLogs = { showDnsLogs = true })
                 1 -> {
                     val predefinitions by settingsManager.appPredefinitions.collectAsState(initial = emptyList())
+                    val mode by settingsManager.filteringMode.collectAsState(initial = FilteringMode.BOTH)
                     HostsScreen(hostSources, downloadProgress, onAdd = { name, url ->
                         scope.launch {
                             val newList = hostSources + HostSource(name = name, url = url)
                             settingsManager.saveHostSources(newList)
-                            hostManager.reload(newList, predefinitions, forceDownload = true)
+                            hostManager.reload(newList, predefinitions, mode, forceDownload = true)
                         }
                     }, onToggle = { source ->
                         scope.launch {
@@ -228,24 +235,24 @@ fun MainApp(
                                 if (it.id == source.id) it.copy(enabled = !it.enabled) else it
                             }
                             settingsManager.saveHostSources(newList)
-                            hostManager.reload(newList, predefinitions, forceDownload = false)
+                            hostManager.reload(newList, predefinitions, mode, forceDownload = false)
                         }
                     }, onDelete = { source ->
                         scope.launch {
                             val newList = hostSources.filter { it.id != source.id }
                             settingsManager.saveHostSources(newList)
-                            hostManager.reload(newList, predefinitions, forceDownload = false)
+                            hostManager.reload(newList, predefinitions, mode, forceDownload = false)
                         }
                     }, onReload = {
                         scope.launch {
-                            hostManager.reload(hostSources, predefinitions, forceDownload = true)
+                            hostManager.reload(hostSources, predefinitions, mode, forceDownload = true)
                         }
                     }, onAddSelected = { items ->
                         scope.launch {
                             val newSources = items.map { HostSource(name = it.name, url = it.link) }
                             settingsManager.addHostSources(newSources)
                             val fullList = hostSources + newSources
-                            hostManager.reload(fullList, predefinitions, forceDownload = true)
+                            hostManager.reload(fullList, predefinitions, mode, forceDownload = true)
                         }
                     })
                 }
@@ -647,9 +654,12 @@ fun AppFilterScreen(
     val captureApps by settingsManager.captureSessionApps.collectAsState(initial = emptyList())
     val sessionLogs by LogManager.sessionLogs.collectAsState()
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    val pm = context.packageManager
     var showAppSelection by remember { mutableStateOf(false) }
     var showReview by remember { mutableStateOf(false) }
     var editingPredefinition by remember { mutableStateOf<AppPredefinition?>(null) }
+    var recapturingPredefinition by remember { mutableStateOf<AppPredefinition?>(null) }
 
     if (showAppSelection) {
         AppSelectionScreen(
@@ -684,19 +694,34 @@ fun AppFilterScreen(
         )
     } else if (showReview) {
         ReviewCaptureScreen(
-            domains = sessionLogs,
+            domains = if (recapturingPredefinition != null) {
+                sessionLogs + recapturingPredefinition!!.blockedDomains + recapturingPredefinition!!.allowedDomains
+            } else sessionLogs,
+            initialName = recapturingPredefinition?.name ?: "",
+            initialBlocked = recapturingPredefinition?.blockedDomains ?: emptySet(),
+            initialAllowed = recapturingPredefinition?.allowedDomains ?: emptySet(),
             onBack = { showReview = false },
             onSave = { name, blocked, allowed ->
                 scope.launch {
-                    val newPred = AppPredefinition(
-                        name = name,
-                        packageNames = captureApps,
-                        blockedDomains = blocked,
-                        allowedDomains = allowed
-                    )
-                    settingsManager.saveAppPredefinitions(predefinitions + newPred)
+                    if (recapturingPredefinition != null) {
+                        val updated = recapturingPredefinition!!.copy(
+                            name = name,
+                            blockedDomains = blocked,
+                            allowedDomains = allowed
+                        )
+                        settingsManager.saveAppPredefinitions(predefinitions.map { if (it.id == updated.id) updated else it })
+                    } else {
+                        val newPred = AppPredefinition(
+                            name = name,
+                            packageNames = captureApps,
+                            blockedDomains = blocked,
+                            allowedDomains = allowed
+                        )
+                        settingsManager.saveAppPredefinitions(predefinitions + newPred)
+                    }
                     settingsManager.setCaptureSessionApps(emptyList())
                     LogManager.clearSessionLogs()
+                    recapturingPredefinition = null
                     showReview = false
                 }
             }
@@ -744,10 +769,38 @@ fun AppFilterScreen(
             LazyColumn(modifier = Modifier.weight(1f)) {
                 items(predefinitions) { pred ->
                     ListItem(
-                        headlineContent = { Text(pred.name) },
+                        headlineContent = { Text(pred.name, fontWeight = FontWeight.SemiBold) },
                         supportingContent = { Text("${pred.packageNames.size} apps, ${pred.blockedDomains.size} blocked") },
+                        leadingContent = {
+                            if (pred.packageNames.isNotEmpty()) {
+                                val icon = remember(pred.packageNames[0]) {
+                                    try { pm.getApplicationIcon(pred.packageNames[0]).toBitmap().asImageBitmap() } catch (e: Exception) { null }
+                                }
+                                if (icon != null) {
+                                    androidx.compose.foundation.Image(
+                                        bitmap = icon,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(40.dp)
+                                    )
+                                } else {
+                                    Icon(Icons.Default.Apps, null, modifier = Modifier.size(40.dp))
+                                }
+                            } else {
+                                Icon(Icons.Default.Apps, null, modifier = Modifier.size(40.dp))
+                            }
+                        },
                         trailingContent = {
                             Row {
+                                IconButton(onClick = {
+                                    recapturingPredefinition = pred
+                                    scope.launch {
+                                        settingsManager.setCaptureSessionApps(pred.packageNames)
+                                        LogManager.clearSessionLogs()
+                                        onVpnToggle(true)
+                                    }
+                                }) {
+                                    Icon(Icons.Default.Refresh, contentDescription = "Recapture")
+                                }
                                 IconButton(onClick = { editingPredefinition = pred }) {
                                     Icon(Icons.Default.Edit, contentDescription = "Edit")
                                 }
@@ -927,17 +980,65 @@ fun ReviewCaptureScreen(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(settingsManager: SettingsManager) {
     val autoUpdate by settingsManager.autoUpdate.collectAsState(initial = false)
     val startOnBoot by settingsManager.startOnBoot.collectAsState(initial = false)
+    val filteringMode by settingsManager.filteringMode.collectAsState(initial = FilteringMode.BOTH)
     val scope = rememberCoroutineScope()
 
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .verticalScroll(androidx.compose.foundation.rememberScrollState())
             .padding(16.dp)
     ) {
+        Text(
+            text = "Filtering Mode",
+            style = MaterialTheme.typography.titleLarge,
+            modifier = Modifier.padding(bottom = 16.dp)
+        )
+
+        Card(
+            modifier = Modifier.fillMaxWidth().padding(bottom = 24.dp),
+            shape = MaterialTheme.shapes.extraLarge,
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
+            border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text("Choose which blocklists to use:", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
+                Spacer(modifier = Modifier.height(16.dp))
+                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                    SegmentedButton(
+                        selected = filteringMode == FilteringMode.GLOBAL,
+                        onClick = { scope.launch { settingsManager.setFilteringMode(FilteringMode.GLOBAL) } },
+                        shape = SegmentedButtonDefaults.itemShape(index = 0, count = 3)
+                    ) { Text("Global") }
+                    SegmentedButton(
+                        selected = filteringMode == FilteringMode.APPS,
+                        onClick = { scope.launch { settingsManager.setFilteringMode(FilteringMode.APPS) } },
+                        shape = SegmentedButtonDefaults.itemShape(index = 1, count = 3)
+                    ) { Text("Apps") }
+                    SegmentedButton(
+                        selected = filteringMode == FilteringMode.BOTH,
+                        onClick = { scope.launch { settingsManager.setFilteringMode(FilteringMode.BOTH) } },
+                        shape = SegmentedButtonDefaults.itemShape(index = 2, count = 3)
+                    ) { Text("Both") }
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(
+                    text = when(filteringMode) {
+                        FilteringMode.GLOBAL -> "Uses only hosts from the Hosts tab for all apps."
+                        FilteringMode.APPS -> "Applies only to apps in the Apps tab using their specific hosts."
+                        FilteringMode.BOTH -> "Combines global hosts and app predefinitions for all apps."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+
         Text(
             text = "Preferences",
             style = MaterialTheme.typography.titleLarge,

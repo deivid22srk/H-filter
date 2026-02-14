@@ -42,28 +42,27 @@ class HostManager(private val context: Context) {
     suspend fun reload(
         sources: List<HostSource>,
         predefinitions: List<com.hfilter.model.AppPredefinition> = emptyList(),
+        filteringMode: com.hfilter.model.FilteringMode = com.hfilter.model.FilteringMode.BOTH,
         forceDownload: Boolean = true
     ) = withContext(Dispatchers.IO) {
         _isLoading.value = true
         val enabledSources = sources.filter { it.enabled }
         val total = enabledSources.size
 
-        if (total == 0) {
-            blockedDomains.clear()
-            saveToCache()
-            _isLoading.value = false
-            return@withContext
-        }
-
         // Step 1: Ensure we have local files for all enabled sources
-        enabledSources.forEachIndexed { index, source ->
-            val localFile = getLocalFileForSource(source)
-            if (forceDownload || !localFile.exists()) {
-                _downloadProgress.value = index.toFloat() / total
-                try {
-                    downloadToFile(source.url, localFile)
-                } catch (e: Exception) {
-                    Log.e("HostManager", "Error downloading ${source.url}", e)
+        val shouldLoadSources = filteringMode != com.hfilter.model.FilteringMode.APPS
+        val shouldLoadApps = filteringMode != com.hfilter.model.FilteringMode.GLOBAL
+
+        if (shouldLoadSources && total > 0) {
+            enabledSources.forEachIndexed { index, source ->
+                val localFile = getLocalFileForSource(source)
+                if (forceDownload || !localFile.exists()) {
+                    _downloadProgress.value = index.toFloat() / total
+                    try {
+                        downloadToFile(source.url, localFile)
+                    } catch (e: Exception) {
+                        Log.e("HostManager", "Error downloading ${source.url}", e)
+                    }
                 }
             }
         }
@@ -73,23 +72,27 @@ class HostManager(private val context: Context) {
         blockedDomains.clear()
 
         // Apply enabled app predefinitions
-        predefinitions.filter { it.enabled }.forEach { pred ->
-            blockedDomains.addAll(pred.blockedDomains.map { it.lowercase() })
-            // Note: Allowed domains in predefinitions should override blocked domains in hosts?
-            // "bloqueio mais eficiente" - maybe handle white-listing
+        if (shouldLoadApps) {
+            predefinitions.filter { it.enabled }.forEach { pred ->
+                blockedDomains.addAll(pred.blockedDomains.map { it.lowercase() })
+            }
         }
 
-        enabledSources.forEach { source ->
-            val localFile = getLocalFileForSource(source)
-            if (localFile.exists()) {
-                parseLocalFile(localFile)
+        if (shouldLoadSources) {
+            enabledSources.forEach { source ->
+                val localFile = getLocalFileForSource(source)
+                if (localFile.exists()) {
+                    parseLocalFile(localFile)
+                }
             }
         }
 
         // Final pass: ensure allowed domains are NOT in the blocked list
-        predefinitions.filter { it.enabled }.forEach { pred ->
-            pred.allowedDomains.forEach { domain ->
-                blockedDomains.remove(domain.lowercase())
+        if (shouldLoadApps) {
+            predefinitions.filter { it.enabled }.forEach { pred ->
+                pred.allowedDomains.forEach { domain ->
+                    blockedDomains.remove(domain.lowercase())
+                }
             }
         }
 

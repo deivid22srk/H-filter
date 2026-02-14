@@ -19,6 +19,7 @@ class SettingsManager(private val context: Context) {
     private val AUTO_UPDATE_KEY = androidx.datastore.preferences.core.booleanPreferencesKey("auto_update")
     private val START_ON_BOOT_KEY = androidx.datastore.preferences.core.booleanPreferencesKey("start_on_boot")
     private val DNS_LOGGING_KEY = androidx.datastore.preferences.core.booleanPreferencesKey("dns_logging")
+    private val FILTERING_MODE_KEY = stringPreferencesKey("filtering_mode")
     private val APP_PREDEFINITIONS_KEY = stringPreferencesKey("app_predefinitions")
     private val CAPTURE_SESSION_APPS_KEY = stringPreferencesKey("capture_session_apps")
 
@@ -26,6 +27,10 @@ class SettingsManager(private val context: Context) {
     val autoUpdate: Flow<Boolean> = context.dataStore.data.map { it[AUTO_UPDATE_KEY] ?: false }
     val startOnBoot: Flow<Boolean> = context.dataStore.data.map { it[START_ON_BOOT_KEY] ?: false }
     val dnsLogging: Flow<Boolean> = context.dataStore.data.map { it[DNS_LOGGING_KEY] ?: false }
+    val filteringMode: Flow<com.hfilter.model.FilteringMode> = context.dataStore.data.map {
+        val modeStr = it[FILTERING_MODE_KEY] ?: com.hfilter.model.FilteringMode.BOTH.name
+        try { com.hfilter.model.FilteringMode.valueOf(modeStr) } catch (e: Exception) { com.hfilter.model.FilteringMode.BOTH }
+    }
 
     suspend fun setVpnEnabled(enabled: Boolean) {
         context.dataStore.edit { it[VPN_ENABLED_KEY] = enabled }
@@ -41,6 +46,10 @@ class SettingsManager(private val context: Context) {
 
     suspend fun setDnsLogging(enabled: Boolean) {
         context.dataStore.edit { it[DNS_LOGGING_KEY] = enabled }
+    }
+
+    suspend fun setFilteringMode(mode: com.hfilter.model.FilteringMode) {
+        context.dataStore.edit { it[FILTERING_MODE_KEY] = mode.name }
     }
 
     val appPredefinitions: Flow<List<com.hfilter.model.AppPredefinition>> = context.dataStore.data.map { preferences ->

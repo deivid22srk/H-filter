@@ -47,11 +47,15 @@ class AdBlockVpnService : VpnService() {
 
         serviceScope.launch {
             hostManager.loadFromCache()
-            // Observe host sources and app predefinitions changes
-            combine(settingsManager.hostSources, settingsManager.appPredefinitions) { sources, preds ->
-                sources to preds
-            }.collect { (sources, preds) ->
-                hostManager.reload(sources, preds, forceDownload = false)
+            // Observe host sources, app predefinitions, and filtering mode changes
+            combine(
+                settingsManager.hostSources,
+                settingsManager.appPredefinitions,
+                settingsManager.filteringMode
+            ) { sources, preds, mode ->
+                Triple(sources, preds, mode)
+            }.collect { (sources, preds, mode) ->
+                hostManager.reload(sources, preds, mode, forceDownload = false)
             }
         }
         createNotificationChannel()
@@ -97,14 +101,21 @@ class AdBlockVpnService : VpnService() {
                     .addRoute("1.1.1.1", 32)
 
                 val captureApps = runBlocking { settingsManager.captureSessionApps.first() }
+                val currentMode = runBlocking { settingsManager.filteringMode.first() }
+                val predefinitions = runBlocking { settingsManager.appPredefinitions.first() }
+
                 isCaptureMode = captureApps.isNotEmpty()
 
                 if (isCaptureMode) {
                     captureApps.forEach {
-                        try {
-                            builder.addAllowedApplication(it)
-                        } catch (e: Exception) {
-                            Log.e("AdBlockVpn", "Failed to add allowed app: $it", e)
+                        try { builder.addAllowedApplication(it) } catch (e: Exception) { Log.e("AdBlockVpn", "Failed to add allowed app: $it", e) }
+                    }
+                } else if (currentMode == com.hfilter.model.FilteringMode.APPS) {
+                    // If only filtering for apps, only include apps that have predefinitions
+                    val appPackages = predefinitions.filter { it.enabled }.flatMap { it.packageNames }.toSet()
+                    if (appPackages.isNotEmpty()) {
+                        appPackages.forEach {
+                            try { builder.addAllowedApplication(it) } catch (e: Exception) { Log.e("AdBlockVpn", "Failed to add app $it", e) }
                         }
                     }
                 }
