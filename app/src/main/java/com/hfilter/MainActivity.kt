@@ -22,6 +22,7 @@ class MainActivity : AppCompatActivity() {
             startVpn()
         } else {
             Toast.makeText(this, "VPN permission denied", Toast.LENGTH_SHORT).show()
+            binding.switchVpn.isChecked = false
         }
     }
 
@@ -32,42 +33,50 @@ class MainActivity : AppCompatActivity() {
 
         hostManager = HostManager(this)
 
-        loadSources()
+        lifecycleScope.launch {
+            hostManager.load()
+            updateStats()
+        }
 
-        binding.btnToggleVpn.setOnClickListener {
-            if (isVpnActive) {
-                stopVpn()
+        binding.switchVpn.setOnCheckedChangeListener { _, isChecked ->
+            if (isChecked) {
+                if (!isVpnActive) prepareVpn()
             } else {
-                prepareVpn()
+                if (isVpnActive) stopVpn()
             }
         }
 
-        binding.btnSaveAndRefresh.setOnClickListener {
-            saveAndRefresh()
+        binding.btnManageSources.setOnClickListener {
+            startActivity(Intent(this, SourcesActivity::class.java))
+        }
+
+        binding.btnRefresh.setOnClickListener {
+            refreshBlocklist()
         }
     }
 
-    private fun loadSources() {
-        val sources = hostManager.getSources()
-        binding.etSources.setText(sources.joinToString("\n"))
+    override fun onResume() {
+        super.onResume()
+        updateStats()
     }
 
-    private fun saveAndRefresh() {
-        val sourcesText = binding.etSources.text.toString()
-        val sources = sourcesText.split("\n").map { it.trim() }.filter { it.isNotEmpty() }
-        hostManager.saveSources(sources)
+    private fun updateStats() {
+        binding.tvStats.text = "${hostManager.getBlockedCount()} domains blocked"
+    }
 
+    private fun refreshBlocklist() {
         lifecycleScope.launch {
-            binding.btnSaveAndRefresh.isEnabled = false
-            binding.btnSaveAndRefresh.text = "Refreshing..."
+            binding.btnRefresh.isEnabled = false
+            binding.btnRefresh.text = "Refreshing..."
             try {
                 hostManager.refreshHosts()
-                Toast.makeText(this@MainActivity, "Hosts refreshed successfully", Toast.LENGTH_SHORT).show()
+                updateStats()
+                Toast.makeText(this@MainActivity, "Blocklist updated", Toast.LENGTH_SHORT).show()
             } catch (e: Exception) {
-                Toast.makeText(this@MainActivity, "Error refreshing hosts", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this@MainActivity, "Failed to refresh blocklist", Toast.LENGTH_SHORT).show()
             } finally {
-                binding.btnSaveAndRefresh.isEnabled = true
-                binding.btnSaveAndRefresh.text = "Save & Refresh Hosts"
+                binding.btnRefresh.isEnabled = true
+                binding.btnRefresh.text = "Refresh Blocklist"
             }
         }
     }
@@ -87,7 +96,7 @@ class MainActivity : AppCompatActivity() {
         }
         startService(intent)
         isVpnActive = true
-        binding.btnToggleVpn.text = "Stop VPN"
+        binding.switchVpn.isChecked = true
     }
 
     private fun stopVpn() {
@@ -96,6 +105,6 @@ class MainActivity : AppCompatActivity() {
         }
         startService(intent)
         isVpnActive = false
-        binding.btnToggleVpn.text = "Start VPN"
+        binding.switchVpn.isChecked = false
     }
 }

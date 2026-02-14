@@ -18,6 +18,11 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".SourcesActivity"
+            android:exported="false"
+            android:label="Manage Sources" />
+
         <service
             android:name=".AdBlockVpnService"
             android:permission="android.permission.BIND_VPN_SERVICE"
