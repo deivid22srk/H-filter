@@ -20,6 +20,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import com.hfilter.model.HostSource
 import com.hfilter.service.AdBlockVpnService
 import com.hfilter.ui.theme.HfilterTheme
@@ -44,7 +46,12 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         settingsManager = SettingsManager(this)
         hostManager = HostManager(this)
-        hostManager.loadFromCache()
+        lifecycleScope.launch(Dispatchers.IO) {
+            hostManager.loadFromCache()
+            if (settingsManager.autoUpdate.first()) {
+                hostManager.reload(settingsManager.hostSources.first())
+            }
+        }
 
         setContent {
             HfilterTheme {
@@ -118,6 +125,12 @@ fun MainApp(
                     icon = { Icon(Icons.AutoMirrored.Filled.List, contentDescription = null) },
                     label = { Text("Hosts") }
                 )
+                NavigationBarItem(
+                    selected = selectedTab == 2,
+                    onClick = { selectedTab = 2 },
+                    icon = { Icon(Icons.Default.Settings, contentDescription = null) },
+                    label = { Text("Settings") }
+                )
             }
         }
     ) { padding ->
@@ -146,6 +159,7 @@ fun MainApp(
                         hostManager.reload(hostSources)
                     }
                 })
+                2 -> SettingsScreen(settingsManager)
             }
         }
     }
@@ -319,5 +333,53 @@ fun HostsScreen(
                 }
             }
         )
+    }
+}
+
+@Composable
+fun SettingsScreen(settingsManager: SettingsManager) {
+    val autoUpdate by settingsManager.autoUpdate.collectAsState(initial = false)
+    val startOnBoot by settingsManager.startOnBoot.collectAsState(initial = false)
+    val scope = rememberCoroutineScope()
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp)
+    ) {
+        Text(
+            text = "Preferences",
+            style = MaterialTheme.typography.titleLarge,
+            modifier = Modifier.padding(bottom = 16.dp)
+        )
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+        ) {
+            Column {
+                ListItem(
+                    headlineContent = { Text("Auto-update on Start") },
+                    supportingContent = { Text("Download hosts every time the app opens") },
+                    trailingContent = {
+                        Switch(
+                            checked = autoUpdate,
+                            onCheckedChange = { scope.launch { settingsManager.setAutoUpdate(it) } }
+                        )
+                    }
+                )
+                HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                ListItem(
+                    headlineContent = { Text("Start on Boot") },
+                    supportingContent = { Text("Start VPN service when device boots") },
+                    trailingContent = {
+                        Switch(
+                            checked = startOnBoot,
+                            onCheckedChange = { scope.launch { settingsManager.setStartOnBoot(it) } }
+                        )
+                    }
+                )
+            }
+        }
     }
 }

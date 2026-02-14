@@ -32,6 +32,9 @@
             <intent-filter>
                 <action android:name="android.net.VpnService" />
             </intent-filter>
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Ad-blocking VPN service to filter DNS traffic based on user-defined host lists." />
         </service>
 
         <receiver

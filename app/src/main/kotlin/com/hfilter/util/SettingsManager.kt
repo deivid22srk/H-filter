@@ -16,11 +16,23 @@ class SettingsManager(private val context: Context) {
     private val gson = Gson()
     private val HOST_SOURCES_KEY = stringPreferencesKey("host_sources")
     private val VPN_ENABLED_KEY = androidx.datastore.preferences.core.booleanPreferencesKey("vpn_enabled")
+    private val AUTO_UPDATE_KEY = androidx.datastore.preferences.core.booleanPreferencesKey("auto_update")
+    private val START_ON_BOOT_KEY = androidx.datastore.preferences.core.booleanPreferencesKey("start_on_boot")
 
     val vpnEnabled: Flow<Boolean> = context.dataStore.data.map { it[VPN_ENABLED_KEY] ?: false }
+    val autoUpdate: Flow<Boolean> = context.dataStore.data.map { it[AUTO_UPDATE_KEY] ?: false }
+    val startOnBoot: Flow<Boolean> = context.dataStore.data.map { it[START_ON_BOOT_KEY] ?: false }
 
     suspend fun setVpnEnabled(enabled: Boolean) {
         context.dataStore.edit { it[VPN_ENABLED_KEY] = enabled }
+    }
+
+    suspend fun setAutoUpdate(enabled: Boolean) {
+        context.dataStore.edit { it[AUTO_UPDATE_KEY] = enabled }
+    }
+
+    suspend fun setStartOnBoot(enabled: Boolean) {
+        context.dataStore.edit { it[START_ON_BOOT_KEY] = enabled }
     }
 
     val hostSources: Flow<List<HostSource>> = context.dataStore.data.map { preferences ->

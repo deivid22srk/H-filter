@@ -77,7 +77,12 @@ class HostManager(private val context: Context) {
     }
 
     private fun saveToCache() {
-        cacheFile.writeText(blockedDomains.joinToString("\n"))
+        cacheFile.bufferedWriter().use { writer ->
+            blockedDomains.forEach { domain ->
+                writer.write(domain)
+                writer.newLine()
+            }
+        }
     }
 
     fun loadFromCache() {
