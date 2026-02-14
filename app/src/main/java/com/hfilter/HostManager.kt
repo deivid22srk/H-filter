@@ -14,7 +14,7 @@ import java.util.concurrent.ConcurrentHashMap
 class HostManager(private val context: Context) {
     private val client = OkHttpClient()
     private val blockedDomains = ConcurrentHashMap.newKeySet<String>()
-    private val hostSourcesFile = File(context.filesDir, "host_sources_v2.json")
+    private val hostSourcesFile = File(context.filesDir, "host_sources_v3.json")
     private val hostsCacheFile = File(context.filesDir, "hosts_cache.txt")
 
     suspend fun load() = withContext(Dispatchers.IO) {
@@ -24,8 +24,11 @@ class HostManager(private val context: Context) {
     fun getHostSources(): List<HostSource> {
         if (!hostSourcesFile.exists()) {
             val defaults = listOf(
-                HostSource(name = "HaGeZi Ultimate", url = "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/ultimate.txt"),
-                HostSource(name = "StevenBlack Hosts", url = "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts")
+                HostSource(name = "StevenBlack Unified", url = "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts", type = SourceType.BUILT_IN),
+                HostSource(name = "StevenBlack Fakenews", url = "https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/fakenews/hosts", type = SourceType.BUILT_IN),
+                HostSource(name = "StevenBlack Gambling", url = "https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/gambling/hosts", type = SourceType.BUILT_IN),
+                HostSource(name = "StevenBlack Porn", url = "https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/porn/hosts", type = SourceType.BUILT_IN),
+                HostSource(name = "StevenBlack Social", url = "https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/social/hosts", type = SourceType.BUILT_IN)
             )
             saveHostSources(defaults)
             return defaults
@@ -39,7 +42,8 @@ class HostManager(private val context: Context) {
                     id = obj.getString("id"),
                     name = obj.getString("name"),
                     url = obj.getString("url"),
-                    enabled = obj.getBoolean("enabled")
+                    enabled = obj.getBoolean("enabled"),
+                    type = SourceType.valueOf(obj.optString("type", "USER"))
                 ))
             }
             sources
@@ -56,6 +60,7 @@ class HostManager(private val context: Context) {
             obj.put("name", source.name)
             obj.put("url", source.url)
             obj.put("enabled", source.enabled)
+            obj.put("type", source.type.name)
             json.put(obj)
         }
         hostSourcesFile.writeText(json.toString())

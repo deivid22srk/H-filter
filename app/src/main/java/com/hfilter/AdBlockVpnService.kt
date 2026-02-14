@@ -1,9 +1,15 @@
 package com.hfilter
 
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Intent
 import android.net.VpnService
+import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.util.Log
+import androidx.core.app.NotificationCompat
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.net.DatagramPacket
@@ -25,29 +31,54 @@ class AdBlockVpnService : VpnService(), Runnable {
     private var vpnThread: Thread? = null
 
     private lateinit var hostManager: HostManager
+    private lateinit var settingsManager: SettingsManager
+
+    companion object {
+        const val CHANNEL_ID = "hfilter_vpn"
+        const val NOTIFICATION_ID = 1
+        const val ACTION_PAUSE = "com.hfilter.PAUSE"
+        const val ACTION_RESUME = "com.hfilter.RESUME"
+    }
 
     override fun onCreate() {
         super.onCreate()
         hostManager = HostManager(this)
+        settingsManager = SettingsManager(this)
         serviceScope.launch {
             hostManager.load()
+        }
+        createNotificationChannel()
+    }
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(CHANNEL_ID, "H-filter VPN Status", NotificationManager.IMPORTANCE_LOW)
+            val manager = getSystemService(NotificationManager::class.java)
+            manager.createNotificationChannel(channel)
         }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == "START") {
-            startVpn()
-        } else if (intent?.action == "STOP") {
-            stopVpn()
+        when (intent?.action) {
+            "START" -> startVpn()
+            "STOP" -> stopVpn()
+            ACTION_PAUSE -> {
+                settingsManager.isVpnPaused = true
+                updateNotification()
+            }
+            ACTION_RESUME -> {
+                settingsManager.isVpnPaused = false
+                updateNotification()
+            }
         }
         return START_STICKY
     }
 
     private fun startVpn() {
         if (isRunning.get()) return
-
         isRunning.set(true)
         vpnThread = Thread(this, "HFilterVpnThread").apply { start() }
+        startForeground(NOTIFICATION_ID, buildNotification())
     }
 
     private fun stopVpn() {
@@ -55,6 +86,33 @@ class AdBlockVpnService : VpnService(), Runnable {
         vpnThread?.interrupt()
         vpnInterface?.close()
         vpnInterface = null
+        stopForeground(true)
+        stopSelf()
+    }
+
+    private fun updateNotification() {
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.notify(NOTIFICATION_ID, buildNotification())
+    }
+
+    private fun buildNotification(): Notification {
+        val isPaused = settingsManager.isVpnPaused
+        val statusText = if (isPaused) "Paused" else "Running"
+        val actionText = if (isPaused) "Resume" else "Pause"
+        val actionIntent = if (isPaused) ACTION_RESUME else ACTION_PAUSE
+
+        val pendingIntent = PendingIntent.getService(
+            this, 0, Intent(this, AdBlockVpnService::class.java).apply { action = actionIntent },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("H-filter Ad-Blocker")
+            .setContentText("Status: $statusText")
+            .setSmallIcon(android.R.drawable.ic_lock_lock)
+            .addAction(0, actionText, pendingIntent)
+            .setOngoing(true)
+            .build()
     }
 
     override fun run() {
@@ -63,7 +121,7 @@ class AdBlockVpnService : VpnService(), Runnable {
                 .setSession("H-filter AdBlock")
                 .addAddress("10.1.1.1", 24)
                 .addDnsServer("8.8.8.8")
-                .addRoute("8.8.8.8", 32) // Only route DNS traffic to the VPN
+                .addRoute("8.8.8.8", 32)
 
             vpnInterface = builder.establish()
 
@@ -77,27 +135,29 @@ class AdBlockVpnService : VpnService(), Runnable {
             while (isRunning.get()) {
                 val readBytes = inputStream.read(buffer.array())
                 if (readBytes > 0) {
-                    val packet = buffer.array().copyOf(readBytes)
-                    if (isDnsRequest(packet, readBytes)) {
-                        val domain = extractDomain(packet, readBytes)
-                        if (domain != null && hostManager.isBlocked(domain)) {
-                            Log.i("VpnService", "Blocking ad domain: $domain")
-                            // Return 0.0.0.0 response
-                            val response = createDnsResponse(packet, readBytes, "0.0.0.0")
-                            outputStream.write(response)
-                        } else {
-                            // Forward DNS query to 8.8.8.8
-                            forwardDnsQuery(packet, readBytes, dnsSocket, outputStream)
-                        }
+                    if (settingsManager.isVpnPaused) {
+                        // If paused, just pass through (or drop if we only route 8.8.8.8)
+                        // Actually, if it's paused we should probably just forward without checking
+                        val packet = buffer.array().copyOf(readBytes)
+                        outputStream.write(packet)
                     } else {
-                        // For other traffic (shouldn't happen with our route but just in case)
-                        outputStream.write(packet, 0, readBytes)
+                        val packet = buffer.array().copyOf(readBytes)
+                        if (isDnsRequest(packet, readBytes)) {
+                            val domain = extractDomain(packet, readBytes)
+                            if (domain != null && hostManager.isBlocked(domain)) {
+                                Log.i("VpnService", "Blocking ad domain: $domain")
+                                val response = createDnsResponse(packet, readBytes, "0.0.0.0")
+                                outputStream.write(response)
+                            } else {
+                                forwardDnsQuery(packet, readBytes, dnsSocket, outputStream)
+                            }
+                        } else {
+                            outputStream.write(packet, 0, readBytes)
+                        }
                     }
                     buffer.clear()
                 }
-                if (readBytes <= 0) {
-                    Thread.sleep(10)
-                }
+                if (readBytes <= 0) Thread.sleep(10)
             }
         } catch (e: Exception) {
             Log.e("VpnService", "Error in VPN loop", e)
@@ -123,23 +183,18 @@ class AdBlockVpnService : VpnService(), Runnable {
             try {
                 val ihl = (packet[0].toInt() and 0x0F) * 4
                 val dnsData = packet.copyOfRange(ihl + 8, length)
-
                 val outPacket = DatagramPacket(dnsData, dnsData.size, InetAddress.getByName("8.8.8.8"), 53)
                 dnsSocket.send(outPacket)
-
                 val responseBuffer = ByteArray(4096)
                 val inPacket = DatagramPacket(responseBuffer, responseBuffer.size)
                 dnsSocket.soTimeout = 2000
                 dnsSocket.receive(inPacket)
-
                 val dnsResponseData = inPacket.data.copyOf(inPacket.length)
                 val fullPacket = wrapInIpUdp(packet, dnsResponseData)
                 synchronized(outputStream) {
                     outputStream.write(fullPacket)
                 }
-            } catch (e: Exception) {
-                // Ignore or log
-            }
+            } catch (e: Exception) {}
         }
     }
 
@@ -159,50 +214,34 @@ class AdBlockVpnService : VpnService(), Runnable {
                 pos += labelLen
             }
             return domain.toString()
-        } catch (e: Exception) {
-            return null
-        }
+        } catch (e: Exception) { return null }
     }
 
     private fun wrapInIpUdp(originalPacket: ByteArray, dnsData: ByteArray): ByteArray {
-        val ihl = (originalPacket[0].toInt() and 0x0F) * 4
         val totalLength = 20 + 8 + dnsData.size
         val result = ByteArray(totalLength)
-
-        // IP Header
         result[0] = 0x45
         result[2] = (totalLength shr 8).toByte()
         result[3] = (totalLength and 0xFF).toByte()
-        result[6] = 0x40.toByte() // Don't fragment
+        result[6] = 0x40.toByte()
         result[7] = 0x00
-        result[8] = 64.toByte() // TTL
-        result[9] = 17 // UDP
-
-        // Swap IPs
-        System.arraycopy(originalPacket, 16, result, 12, 4) // Src = Original Dst
-        System.arraycopy(originalPacket, 12, result, 16, 4) // Dst = Original Src
-
-        // IP Checksum
+        result[8] = 64.toByte()
+        result[9] = 17
+        System.arraycopy(originalPacket, 16, result, 12, 4)
+        System.arraycopy(originalPacket, 12, result, 16, 4)
         fillChecksum(result, 0, 20, 10)
-
-        // UDP Header
         val udpStart = 20
         result[udpStart] = (53 shr 8).toByte()
         result[udpStart + 1] = (53 and 0xFF).toByte()
-        val origUdpStart = ihl
-        result[udpStart + 2] = originalPacket[origUdpStart] // Dst port = Original Src port
-        result[udpStart + 3] = originalPacket[origUdpStart + 1]
+        val ihl = (originalPacket[0].toInt() and 0x0F) * 4
+        result[udpStart + 2] = originalPacket[ihl]
+        result[udpStart + 3] = originalPacket[ihl + 1]
         val udpLength = 8 + dnsData.size
         result[udpStart + 4] = (udpLength shr 8).toByte()
         result[udpStart + 5] = (udpLength and 0xFF).toByte()
-
-        // DNS Data
         System.arraycopy(dnsData, 0, result, 28, dnsData.size)
-
-        // UDP Checksum (Optional, can be 0)
         result[udpStart + 6] = 0
         result[udpStart + 7] = 0
-
         return result
     }
 
@@ -215,9 +254,7 @@ class AdBlockVpnService : VpnService(), Runnable {
             sum += ((data[i].toInt() and 0xFF) shl 8) or (data[i + 1].toInt() and 0xFF)
             i += 2
         }
-        while (sum shr 16 != 0) {
-            sum = (sum and 0xFFFF) + (sum shr 16)
-        }
+        while (sum shr 16 != 0) sum = (sum and 0xFFFF) + (sum shr 16)
         sum = sum.inv()
         data[checksumPos] = (sum shr 8).toByte()
         data[checksumPos + 1] = (sum and 0xFF).toByte()
@@ -226,33 +263,26 @@ class AdBlockVpnService : VpnService(), Runnable {
     private fun createDnsResponse(queryPacket: ByteArray, length: Int, ip: String): ByteArray {
         val ihl = (queryPacket[0].toInt() and 0x0F) * 4
         val dnsQuery = queryPacket.copyOfRange(ihl + 8, length)
-
-        // Basic DNS Response (Hardcoded for A record)
         val response = ByteBuffer.allocate(dnsQuery.size + 16)
-        response.put(dnsQuery.copyOf(2)) // ID
-        response.putShort(0x8180.toShort()) // Flags: Response, No error
-        response.putShort(dnsQuery.getShort(4)) // QDCOUNT
-        response.putShort(1) // ANCOUNT
-        response.putShort(0) // NSCOUNT
-        response.putShort(0) // ARCOUNT
-
-        // Question section (copy from query)
+        response.put(dnsQuery.copyOf(2))
+        response.putShort(0x8180.toShort())
+        response.putShort(dnsQuery.getShort(4))
+        response.putShort(1)
+        response.putShort(0)
+        response.putShort(0)
         var pos = 12
         while (pos < dnsQuery.size && dnsQuery[pos] != 0.toByte()) {
             pos += (dnsQuery[pos].toInt() and 0xFF) + 1
         }
-        pos += 5 // Null terminator + Type + Class
+        pos += 5
         response.put(dnsQuery.copyOfRange(12, pos))
-
-        // Answer section
-        response.putShort(0xC00C.toShort()) // Pointer to name
-        response.putShort(1) // Type A
-        response.putShort(1) // Class IN
-        response.putInt(60) // TTL
-        response.putShort(4) // RDLENGTH
+        response.putShort(0xC00C.toShort())
+        response.putShort(1)
+        response.putShort(1)
+        response.putInt(60)
+        response.putShort(4)
         val ipParts = ip.split(".").map { it.toInt().toByte() }
         response.put(ipParts.toByteArray())
-
         return wrapInIpUdp(queryPacket, response.array().copyOf(response.position()))
     }
 
