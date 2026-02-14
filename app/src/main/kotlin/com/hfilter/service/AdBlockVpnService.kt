@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -12,6 +13,12 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.hfilter.MainActivity
 import com.hfilter.util.HostManager
+import com.hfilter.util.SettingsManager
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.net.DatagramPacket
@@ -23,9 +30,10 @@ import java.util.concurrent.Executors
 class AdBlockVpnService : VpnService() {
     private var vpnInterface: ParcelFileDescriptor? = null
     private lateinit var hostManager: HostManager
+    private lateinit var settingsManager: SettingsManager
     private val executor = Executors.newFixedThreadPool(5)
     private var isRunning = false
-    private val dnsForwarderSocket = DatagramSocket()
+    private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     companion object {
         const val CHANNEL_ID = "vpn_channel"
@@ -36,6 +44,7 @@ class AdBlockVpnService : VpnService() {
         super.onCreate()
         hostManager = HostManager(this)
         hostManager.loadFromCache()
+        settingsManager = SettingsManager(this)
         createNotificationChannel()
     }
 
@@ -47,7 +56,14 @@ class AdBlockVpnService : VpnService() {
 
         if (!isRunning) {
             isRunning = true
-            startForeground(NOTIFICATION_ID, createNotification())
+            serviceScope.launch {
+                settingsManager.setVpnEnabled(true)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                startForeground(NOTIFICATION_ID, createNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+            } else {
+                startForeground(NOTIFICATION_ID, createNotification())
+            }
             executor.execute {
                 runVpn()
             }
@@ -61,9 +77,18 @@ class AdBlockVpnService : VpnService() {
                 .setSession("H-filter")
                 .addAddress("10.0.0.1", 24)
                 .addDnsServer("8.8.8.8")
+                // Only route common DNS servers to intercept them
                 .addRoute("8.8.8.8", 32)
+                .addRoute("8.8.4.4", 32)
+                .addRoute("1.1.1.1", 32)
 
             vpnInterface = builder.establish()
+            if (vpnInterface == null) {
+                Log.e("AdBlockVpn", "Failed to establish VPN interface")
+                stopVpn()
+                return
+            }
+
             val input = FileInputStream(vpnInterface?.fileDescriptor)
             val output = FileOutputStream(vpnInterface?.fileDescriptor)
 
@@ -85,63 +110,53 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun processPacket(buffer: ByteBuffer, output: FileOutputStream) {
-        if (buffer.remaining() < 28) return // Min IP + UDP header
+        try {
+            if (buffer.remaining() < 28) return
 
-        val versionIhl = buffer.get(0).toInt() and 0xFF
-        val version = versionIhl shr 4
-        if (version != 4) return // Only IPv4 for simplicity
+            val versionIhl = buffer.get(0).toInt() and 0xFF
+            val ihl = (versionIhl and 0x0F) * 4
+            val protocol = buffer.get(9).toInt() and 0xFF
 
-        val ihl = (versionIhl and 0x0F) * 4
-        val protocol = buffer.get(9).toInt() and 0xFF
-
-        if (protocol == 17) { // UDP
-            val srcPort = ((buffer.get(ihl).toInt() and 0xFF) shl 8) or (buffer.get(ihl + 1).toInt() and 0xFF)
-            val dstPort = ((buffer.get(ihl + 2).toInt() and 0xFF) shl 8) or (buffer.get(ihl + 3).toInt() and 0xFF)
-
-            if (dstPort == 53) {
-                handleDnsQuery(buffer, ihl + 8, output)
+            if (protocol == 17) { // UDP
+                val dstPort = ((buffer.get(ihl + 2).toInt() and 0xFF) shl 8) or (buffer.get(ihl + 3).toInt() and 0xFF)
+                if (dstPort == 53) {
+                    handleDnsQuery(buffer, ihl + 8)
+                }
             }
+        } catch (e: Exception) {
+            Log.e("AdBlockVpn", "Error processing packet", e)
         }
     }
 
-    private fun handleDnsQuery(packetBuffer: ByteBuffer, dnsOffset: Int, output: FileOutputStream) {
+    private fun handleDnsQuery(packetBuffer: ByteBuffer, dnsOffset: Int) {
         val dnsData = ByteArray(packetBuffer.remaining() - dnsOffset)
         packetBuffer.position(dnsOffset)
         packetBuffer.get(dnsData)
 
         val domain = parseDnsDomain(dnsData)
-        if (domain != null && hostManager.isBlocked(domain)) {
-            Log.d("AdBlockVpn", "Blocked: $domain")
-            // In a real implementation, forge a 0.0.0.0 response here.
-            // For now, we just drop the packet to "block" it.
-        } else {
-            // Forward to real DNS
-            executor.execute {
-                try {
-                    val forwardPacket = DatagramPacket(dnsData, dnsData.size, InetAddress.getByName("8.8.8.8"), 53)
-                    dnsForwarderSocket.send(forwardPacket)
-
-                    val responseData = ByteArray(1024)
-                    val responsePacket = DatagramPacket(responseData, responseData.size)
-                    dnsForwarderSocket.receive(responsePacket)
-
-                    // We'd need to send the response back to the TUN interface.
-                    // This requires forging an IP/UDP packet.
-                } catch (e: Exception) {
-                    Log.e("AdBlockVpn", "DNS forwarding failed", e)
-                }
+        if (domain != null) {
+            if (hostManager.isBlocked(domain)) {
+                Log.d("AdBlockVpn", "Blocked domain: $domain")
+                // By not forwarding, we effectively block it (timeout)
+                // A better way is to send back a REFUSED or 0.0.0.0 response
+            } else {
+                // In a full implementation, we would forward this and return the response.
+                // Intercepting and forwarding DNS is complex because we need to spoof the response IP.
+                Log.d("AdBlockVpn", "Allowed domain: $domain")
             }
         }
     }
 
     private fun parseDnsDomain(dnsData: ByteArray): String? {
         try {
-            var pos = 12 // Skip DNS header
+            if (dnsData.size < 12) return null
+            var pos = 12
             val sb = StringBuilder()
             while (pos < dnsData.size) {
                 val len = dnsData[pos].toInt() and 0xFF
                 if (len == 0) break
                 pos++
+                if (pos + len > dnsData.size) break
                 for (i in 0 until len) {
                     sb.append(dnsData[pos].toInt().toChar())
                     pos++
@@ -156,7 +171,11 @@ class AdBlockVpnService : VpnService() {
     }
 
     private fun stopVpn() {
+        if (!isRunning) return
         isRunning = false
+        serviceScope.launch {
+            settingsManager.setVpnEnabled(false)
+        }
         try {
             vpnInterface?.close()
         } catch (e: Exception) {
@@ -171,7 +190,7 @@ class AdBlockVpnService : VpnService() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "VPN Service",
+                "H-filter VPN",
                 NotificationManager.IMPORTANCE_LOW
             )
             val manager = getSystemService(NotificationManager::class.java)
@@ -192,16 +211,17 @@ class AdBlockVpnService : VpnService() {
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("H-filter is Active")
-            .setContentText("Blocking ads...")
+            .setContentText("Ad-blocking in progress...")
             .setSmallIcon(android.R.drawable.ic_lock_lock)
             .setContentIntent(pendingIntent)
-            .addAction(0, "Stop", stopIntent)
+            .setOngoing(true)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", stopIntent)
             .build()
     }
 
     override fun onDestroy() {
         stopVpn()
-        dnsForwarderSocket.close()
+        serviceScope.cancel()
         super.onDestroy()
     }
 }

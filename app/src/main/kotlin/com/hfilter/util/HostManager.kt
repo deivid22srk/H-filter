@@ -5,6 +5,8 @@ import android.util.Log
 import com.hfilter.model.HostSource
 import com.hfilter.model.SourceType
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -15,6 +17,9 @@ class HostManager(private val context: Context) {
     private val client = OkHttpClient()
     private val blockedDomains = ConcurrentHashMap.newKeySet<String>()
 
+    private val _downloadProgress = MutableStateFlow<Float?>(null)
+    val downloadProgress: StateFlow<Float?> = _downloadProgress
+
     // File to cache the combined blocked domains
     private val cacheFile = File(context.cacheDir, "blocked_domains.txt")
 
@@ -24,14 +29,20 @@ class HostManager(private val context: Context) {
 
     suspend fun reload(sources: List<HostSource>) = withContext(Dispatchers.IO) {
         blockedDomains.clear()
-        sources.filter { it.enabled }.forEach { source ->
+        val enabledSources = sources.filter { it.enabled }
+        val total = enabledSources.size
+
+        enabledSources.forEachIndexed { index, source ->
+            _downloadProgress.value = index.toFloat() / total
             try {
                 downloadAndParse(source.url)
             } catch (e: Exception) {
                 Log.e("HostManager", "Error downloading ${source.url}", e)
             }
         }
+        _downloadProgress.value = 1.0f
         saveToCache()
+        _downloadProgress.value = null
     }
 
     private fun downloadAndParse(url: String) {

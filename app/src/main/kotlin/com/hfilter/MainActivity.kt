@@ -7,6 +7,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -35,6 +36,7 @@ class MainActivity : ComponentActivity() {
     ) { result ->
         if (result.resultCode == RESULT_OK) {
             startVpn()
+            lifecycleScope.launch { settingsManager.setVpnEnabled(true) }
         }
     }
 
@@ -53,18 +55,17 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun onVpnToggle(enabled: Boolean) {
-        lifecycleScope.launch {
-            settingsManager.setVpnEnabled(enabled)
-        }
         if (enabled) {
             val intent = VpnService.prepare(this)
             if (intent != null) {
                 vpnPermissionResult.launch(intent)
             } else {
                 startVpn()
+                lifecycleScope.launch { settingsManager.setVpnEnabled(true) }
             }
         } else {
             stopVpn()
+            lifecycleScope.launch { settingsManager.setVpnEnabled(false) }
         }
     }
 
@@ -87,14 +88,19 @@ fun MainApp(
 ) {
     var selectedTab by remember { mutableIntStateOf(0) }
     val hostSources by settingsManager.hostSources.collectAsState(initial = emptyList())
+    val downloadProgress by hostManager.downloadProgress.collectAsState()
     val scope = rememberCoroutineScope()
+    val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
 
     Scaffold(
+        modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
-            TopAppBar(
+            LargeTopAppBar(
                 title = { Text("H-filter") },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceColorAtElevation(3.dp)
+                scrollBehavior = scrollBehavior,
+                colors = TopAppBarDefaults.largeTopAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    scrolledContainerColor = MaterialTheme.colorScheme.surfaceColorAtElevation(3.dp)
                 )
             )
         },
@@ -118,7 +124,7 @@ fun MainApp(
         Column(modifier = Modifier.padding(padding)) {
             when (selectedTab) {
                 0 -> HomeScreen(hostManager, vpnActive, onVpnToggle)
-                1 -> HostsScreen(hostSources, onAdd = { name, url ->
+                1 -> HostsScreen(hostSources, downloadProgress, onAdd = { name, url ->
                     scope.launch {
                         val newList = hostSources + HostSource(name = name, url = url)
                         settingsManager.saveHostSources(newList)
@@ -154,25 +160,36 @@ fun HomeScreen(hostManager: HostManager, vpnActive: Boolean, onVpnToggle: (Boole
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        Card(
+        ElevatedCard(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(bottom = 32.dp),
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surfaceVariant
+                .padding(bottom = 48.dp),
+            shape = MaterialTheme.shapes.extraLarge,
+            colors = CardDefaults.elevatedCardColors(
+                containerColor = if (vpnActive) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant
             )
         ) {
             Column(modifier = Modifier.padding(24.dp)) {
                 Text(
                     text = "Status",
-                    style = MaterialTheme.typography.titleMedium
+                    style = MaterialTheme.typography.titleMedium,
+                    color = if (vpnActive) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = if (vpnActive) "VPN is Active" else "VPN is Inactive",
-                    style = MaterialTheme.typography.headlineSmall,
-                    color = if (vpnActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
-                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        if (vpnActive) Icons.Default.Shield else Icons.Default.ShieldMoon,
+                        contentDescription = null,
+                        modifier = Modifier.size(32.dp),
+                        tint = if (vpnActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
+                    )
+                    Spacer(modifier = Modifier.width(16.dp))
+                    Text(
+                        text = if (vpnActive) "Protection Active" else "Protection Paused",
+                        style = MaterialTheme.typography.headlineSmall,
+                        color = if (vpnActive) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
                 Spacer(modifier = Modifier.height(16.dp))
                 Text(
                     text = "${hostManager.getBlockedCount()} domains blocked",
@@ -181,18 +198,21 @@ fun HomeScreen(hostManager: HostManager, vpnActive: Boolean, onVpnToggle: (Boole
             }
         }
 
-        Button(
-            onClick = {
-                onVpnToggle(!vpnActive)
-            },
-            modifier = Modifier.size(120.dp),
-            shape = MaterialTheme.shapes.extraLarge
+        Surface(
+            onClick = { onVpnToggle(!vpnActive) },
+            modifier = Modifier.size(160.dp),
+            shape = MaterialTheme.shapes.extraLarge,
+            color = if (vpnActive) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+            tonalElevation = 8.dp
         ) {
-            Icon(
-                if (vpnActive) Icons.Default.Close else Icons.Default.PlayArrow,
-                contentDescription = null,
-                modifier = Modifier.size(48.dp)
-            )
+            Box(contentAlignment = Alignment.Center) {
+                Icon(
+                    if (vpnActive) Icons.Default.PowerSettingsNew else Icons.Default.PlayArrow,
+                    contentDescription = null,
+                    modifier = Modifier.size(64.dp),
+                    tint = if (vpnActive) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
     }
 }
@@ -200,6 +220,7 @@ fun HomeScreen(hostManager: HostManager, vpnActive: Boolean, onVpnToggle: (Boole
 @Composable
 fun HostsScreen(
     sources: List<HostSource>,
+    downloadProgress: Float?,
     onAdd: (String, String) -> Unit,
     onToggle: (HostSource) -> Unit,
     onDelete: (HostSource) -> Unit,
@@ -210,6 +231,12 @@ fun HostsScreen(
     var newUrl by remember { mutableStateOf("") }
 
     Column(modifier = Modifier.fillMaxSize()) {
+        if (downloadProgress != null) {
+            LinearProgressIndicator(
+                progress = { downloadProgress },
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -223,22 +250,35 @@ fun HostsScreen(
             }
         }
 
-        LazyColumn(modifier = Modifier.weight(1f)) {
+        LazyColumn(
+            modifier = Modifier.weight(1f),
+            contentPadding = PaddingValues(bottom = 80.dp)
+        ) {
             items(sources) { source ->
-                ListItem(
-                    headlineContent = { Text(source.name) },
-                    supportingContent = { Text(source.url, maxLines = 1) },
-                    trailingContent = {
-                        Row {
-                            Checkbox(checked = source.enabled, onCheckedChange = { onToggle(source) })
-                            if (source.type == com.hfilter.model.SourceType.USER) {
-                                IconButton(onClick = { onDelete(source) }) {
-                                    Icon(Icons.Default.Delete, contentDescription = null)
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (source.enabled) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.surface
+                    )
+                ) {
+                    ListItem(
+                        headlineContent = { Text(source.name, style = MaterialTheme.typography.titleMedium) },
+                        supportingContent = { Text(source.url, maxLines = 1, style = MaterialTheme.typography.bodySmall) },
+                        trailingContent = {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Switch(checked = source.enabled, onCheckedChange = { onToggle(source) })
+                                if (source.type == com.hfilter.model.SourceType.USER) {
+                                    IconButton(onClick = { onDelete(source) }) {
+                                        Icon(Icons.Default.Delete, contentDescription = null)
+                                    }
                                 }
                             }
-                        }
-                    }
-                )
+                        },
+                        colors = ListItemDefaults.colors(containerColor = androidx.compose.ui.graphics.Color.Transparent)
+                    )
+                }
             }
         }
 
