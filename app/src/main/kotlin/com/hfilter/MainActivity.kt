@@ -1,11 +1,14 @@
 package com.hfilter
 
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.pm.ApplicationInfo
 import android.net.VpnService
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.foundation.lazy.LazyColumn
@@ -20,12 +23,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.core.graphics.drawable.toBitmap
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
-import com.hfilter.model.HostSource
-import com.hfilter.model.FilterResponse
-import com.hfilter.model.FilterItem
+import com.hfilter.model.*
 import com.hfilter.util.LogManager
 import com.hfilter.service.AdBlockVpnService
 import com.hfilter.ui.theme.HfilterTheme
@@ -39,6 +42,14 @@ import com.google.gson.Gson
 class MainActivity : ComponentActivity() {
     private lateinit var settingsManager: SettingsManager
     private lateinit var hostManager: HostManager
+
+    private val exportLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+        uri?.let { exportPredefinitions(it) }
+    }
+
+    private val importLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let { importPredefinitions(it) }
+    }
 
     private val vpnPermissionResult = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -56,14 +67,21 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch(Dispatchers.IO) {
             hostManager.loadFromCache()
             if (settingsManager.autoUpdate.first()) {
-                hostManager.reload(settingsManager.hostSources.first())
+                hostManager.reload(settingsManager.hostSources.first(), settingsManager.appPredefinitions.first())
             }
         }
 
         setContent {
             HfilterTheme {
                 val vpnActive by settingsManager.vpnEnabled.collectAsState(initial = false)
-                MainApp(settingsManager, hostManager, vpnActive, ::onVpnToggle)
+                MainApp(
+                    settingsManager,
+                    hostManager,
+                    vpnActive,
+                    ::onVpnToggle,
+                    onExport = { exportLauncher.launch("hfilter_app_filters.json") },
+                    onImport = { importLauncher.launch(arrayOf("application/json")) }
+                )
             }
         }
     }
@@ -90,6 +108,36 @@ class MainActivity : ComponentActivity() {
     private fun stopVpn() {
         startService(Intent(this, AdBlockVpnService::class.java).apply { action = "STOP" })
     }
+
+    private fun exportPredefinitions(uri: android.net.Uri) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val list = settingsManager.appPredefinitions.first()
+                val json = Gson().toJson(list)
+                contentResolver.openOutputStream(uri)?.use {
+                    it.write(json.toByteArray())
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    private fun importPredefinitions(uri: android.net.Uri) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                contentResolver.openInputStream(uri)?.use { input ->
+                    val json = input.bufferedReader().use { it.readText() }
+                    val type = object : com.google.gson.reflect.TypeToken<List<AppPredefinition>>() {}.type
+                    val list: List<AppPredefinition> = Gson().fromJson(json, type)
+                    val current = settingsManager.appPredefinitions.first()
+                    settingsManager.saveAppPredefinitions(current + list)
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -98,7 +146,9 @@ fun MainApp(
     settingsManager: SettingsManager,
     hostManager: HostManager,
     vpnActive: Boolean,
-    onVpnToggle: (Boolean) -> Unit
+    onVpnToggle: (Boolean) -> Unit,
+    onExport: () -> Unit,
+    onImport: () -> Unit
 ) {
     var selectedTab by remember { mutableIntStateOf(0) }
     var showDnsLogs by remember { mutableStateOf(false) }
@@ -155,38 +205,41 @@ fun MainApp(
             } else {
             when (selectedTab) {
                 0 -> HomeScreen(hostManager, vpnActive, onVpnToggle, onShowLogs = { showDnsLogs = true })
-                1 -> HostsScreen(hostSources, downloadProgress, onAdd = { name, url ->
-                    scope.launch {
-                        val newList = hostSources + HostSource(name = name, url = url)
-                        settingsManager.saveHostSources(newList)
-                        hostManager.reload(newList, forceDownload = true)
-                    }
-                }, onToggle = { source ->
-                    scope.launch {
-                        val newList = hostSources.map {
-                            if (it.id == source.id) it.copy(enabled = !it.enabled) else it
+                1 -> {
+                    val predefinitions by settingsManager.appPredefinitions.collectAsState(initial = emptyList())
+                    HostsScreen(settingsManager, hostSources, downloadProgress, onAdd = { name, url ->
+                        scope.launch {
+                            val newList = hostSources + HostSource(name = name, url = url)
+                            settingsManager.saveHostSources(newList)
+                            hostManager.reload(newList, predefinitions, forceDownload = true)
                         }
-                        settingsManager.saveHostSources(newList)
-                        hostManager.reload(newList, forceDownload = false)
-                    }
-                }, onDelete = { source ->
-                    scope.launch {
-                        val newList = hostSources.filter { it.id != source.id }
-                        settingsManager.saveHostSources(newList)
-                        hostManager.reload(newList, forceDownload = false)
-                    }
-                }, onReload = {
-                    scope.launch {
-                        hostManager.reload(hostSources, forceDownload = true)
-                    }
-                }, onAddSelected = { items ->
-                    scope.launch {
-                        val newSources = items.map { HostSource(name = it.name, url = it.link) }
-                        settingsManager.addHostSources(newSources)
-                        val fullList = hostSources + newSources
-                        hostManager.reload(fullList, forceDownload = true)
-                    }
-                })
+                    }, onToggle = { source ->
+                        scope.launch {
+                            val newList = hostSources.map {
+                                if (it.id == source.id) it.copy(enabled = !it.enabled) else it
+                            }
+                            settingsManager.saveHostSources(newList)
+                            hostManager.reload(newList, predefinitions, forceDownload = false)
+                        }
+                    }, onDelete = { source ->
+                        scope.launch {
+                            val newList = hostSources.filter { it.id != source.id }
+                            settingsManager.saveHostSources(newList)
+                            hostManager.reload(newList, predefinitions, forceDownload = false)
+                        }
+                    }, onReload = {
+                        scope.launch {
+                            hostManager.reload(hostSources, predefinitions, forceDownload = true)
+                        }
+                    }, onAddSelected = { items ->
+                        scope.launch {
+                            val newSources = items.map { HostSource(name = it.name, url = it.link) }
+                            settingsManager.addHostSources(newSources)
+                            val fullList = hostSources + newSources
+                            hostManager.reload(fullList, predefinitions, forceDownload = true)
+                        }
+                }, onAppFilterExport = onExport, onAppFilterImport = onImport)
+                }
                 2 -> SettingsScreen(settingsManager)
             }
             }
@@ -437,13 +490,16 @@ fun HomeScreen(hostManager: HostManager, vpnActive: Boolean, onVpnToggle: (Boole
 
 @Composable
 fun HostsScreen(
+    settingsManager: SettingsManager,
     sources: List<HostSource>,
     downloadProgress: Float?,
     onAdd: (String, String) -> Unit,
     onAddSelected: (List<FilterItem>) -> Unit,
     onToggle: (HostSource) -> Unit,
     onDelete: (HostSource) -> Unit,
-    onReload: () -> Unit
+    onReload: () -> Unit,
+    onAppFilterExport: () -> Unit,
+    onAppFilterImport: () -> Unit
 ) {
     var subTab by remember { mutableIntStateOf(0) }
     var showDialog by remember { mutableStateOf(false) }
@@ -461,6 +517,7 @@ fun HostsScreen(
         TabRow(selectedTabIndex = subTab) {
             Tab(selected = subTab == 0, onClick = { subTab = 0 }, text = { Text("My Hosts") })
             Tab(selected = subTab == 1, onClick = { subTab = 1 }, text = { Text("Explore") })
+            Tab(selected = subTab == 2, onClick = { subTab = 2 }, text = { Text("App Filters") })
         }
 
         if (subTab == 0) {
@@ -508,12 +565,14 @@ fun HostsScreen(
                     }
                 }
             }
-        } else {
+        } else if (subTab == 1) {
             ExploreFiltersScreen(
                 onAdd = onAdd,
                 onAddSelected = onAddSelected,
                 alreadyAddedUrls = sources.map { it.url }.toSet()
             )
+        } else {
+            AppFilterScreen(settingsManager, onExport = onAppFilterExport, onImport = onAppFilterImport)
         }
     }
 
@@ -557,6 +616,230 @@ fun HostsScreen(
                 }
             }
         )
+    }
+}
+
+@Composable
+fun AppFilterScreen(
+    settingsManager: SettingsManager,
+    onExport: () -> Unit,
+    onImport: () -> Unit
+) {
+    val predefinitions by settingsManager.appPredefinitions.collectAsState(initial = emptyList())
+    val captureApps by settingsManager.captureSessionApps.collectAsState(initial = emptyList())
+    val sessionLogs by LogManager.sessionLogs.collectAsState()
+    val scope = rememberCoroutineScope()
+    var showAppSelection by remember { mutableStateOf(false) }
+    var showReview by remember { mutableStateOf(false) }
+
+    if (showAppSelection) {
+        AppSelectionScreen(
+            onBack = { showAppSelection = false },
+            onStartCapture = { apps ->
+                scope.launch {
+                    settingsManager.setCaptureSessionApps(apps)
+                    LogManager.clearSessionLogs()
+                    showAppSelection = false
+                }
+            }
+        )
+    } else if (showReview) {
+        ReviewCaptureScreen(
+            domains = sessionLogs,
+            onBack = { showReview = false },
+            onSave = { name, blocked, allowed ->
+                scope.launch {
+                    val newPred = AppPredefinition(
+                        name = name,
+                        packageNames = captureApps,
+                        blockedDomains = blocked,
+                        allowedDomains = allowed
+                    )
+                    settingsManager.saveAppPredefinitions(predefinitions + newPred)
+                    settingsManager.setCaptureSessionApps(emptyList())
+                    LogManager.clearSessionLogs()
+                    showReview = false
+                }
+            }
+        )
+    } else {
+        Column(modifier = Modifier.fillMaxSize()) {
+            if (captureApps.isNotEmpty()) {
+                Card(
+                    modifier = Modifier.padding(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("Capture Session Active", style = MaterialTheme.typography.titleMedium)
+                        Text("${sessionLogs.size} unique domains captured", style = MaterialTheme.typography.bodySmall)
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Row {
+                            Button(onClick = { showReview = true }) {
+                                Text("Stop and Review")
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            TextButton(onClick = {
+                                scope.launch {
+                                    settingsManager.setCaptureSessionApps(emptyList())
+                                    LogManager.clearSessionLogs()
+                                }
+                            }) {
+                                Text("Cancel")
+                            }
+                        }
+                    }
+                }
+            } else {
+                Row(modifier = Modifier.padding(16.dp)) {
+                    Button(onClick = { showAppSelection = true }) {
+                        Icon(Icons.Default.Add, contentDescription = null)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("New App Capture")
+                    }
+                    Spacer(modifier = Modifier.weight(1f))
+                    IconButton(onClick = onImport) { Icon(Icons.Default.Upload, contentDescription = "Import") }
+                    IconButton(onClick = onExport) { Icon(Icons.Default.Download, contentDescription = "Export") }
+                }
+            }
+
+            LazyColumn(modifier = Modifier.weight(1f)) {
+                items(predefinitions) { pred ->
+                    ListItem(
+                        headlineContent = { Text(pred.name) },
+                        supportingContent = { Text("${pred.packageNames.size} apps, ${pred.blockedDomains.size} blocked") },
+                        trailingContent = {
+                            IconButton(onClick = {
+                                scope.launch {
+                                    settingsManager.saveAppPredefinitions(predefinitions.filter { it.id != pred.id })
+                                }
+                            }) {
+                                Icon(Icons.Default.Delete, contentDescription = null)
+                            }
+                        }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun AppSelectionScreen(onBack: () -> Unit, onStartCapture: (List<String>) -> Unit) {
+    val context = LocalContext.current
+    val pm = context.packageManager
+    val apps = remember {
+        pm.getInstalledApplications(PackageManager.GET_META_DATA)
+            .filter { (it.flags and ApplicationInfo.FLAG_SYSTEM) == 0 }
+            .map { AppInfo(it.packageName, it.loadLabel(pm).toString()) }
+            .sortedBy { it.name }
+    }
+    val selectedApps = remember { mutableStateListOf<String>() }
+
+    Column(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(16.dp)
+        ) {
+            IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, null) }
+            Text("Select Apps to Capture", style = MaterialTheme.typography.titleLarge)
+        }
+
+        LazyColumn(modifier = Modifier.weight(1f)) {
+            items(apps) { app ->
+                ListItem(
+                    headlineContent = { Text(app.name) },
+                    supportingContent = { Text(app.packageName) },
+                    leadingContent = {
+                        Checkbox(
+                            checked = selectedApps.contains(app.packageName),
+                            onCheckedChange = {
+                                if (it) selectedApps.add(app.packageName) else selectedApps.remove(app.packageName)
+                            }
+                        )
+                    }
+                )
+            }
+        }
+
+        Button(
+            onClick = { onStartCapture(selectedApps.toList()) },
+            enabled = selectedApps.isNotEmpty(),
+            modifier = Modifier.fillMaxWidth().padding(16.dp)
+        ) {
+            Text("Start Capture")
+        }
+    }
+}
+
+@Composable
+fun ReviewCaptureScreen(
+    domains: Set<String>,
+    onBack: () -> Unit,
+    onSave: (String, Set<String>, Set<String>) -> Unit
+) {
+    var name by remember { mutableStateOf("") }
+    val blocked = remember { mutableStateListOf<String>() }
+    val allowed = remember { mutableStateListOf<String>() }
+    val domainList = remember { domains.toList().sorted() }
+
+    Column(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(16.dp)
+        ) {
+            IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, null) }
+            Text("Review Captured Hosts", style = MaterialTheme.typography.titleLarge)
+        }
+
+        TextField(
+            value = name,
+            onValueChange = { name = it },
+            label = { Text("Predefinition Name") },
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
+        )
+
+        LazyColumn(modifier = Modifier.weight(1f)) {
+            items(domainList) { domain ->
+                ListItem(
+                    headlineContent = { Text(domain) },
+                    trailingContent = {
+                        Row {
+                            FilterChip(
+                                selected = blocked.contains(domain),
+                                onClick = {
+                                    if (blocked.contains(domain)) blocked.remove(domain)
+                                    else {
+                                        blocked.add(domain)
+                                        allowed.remove(domain)
+                                    }
+                                },
+                                label = { Text("Block") }
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            FilterChip(
+                                selected = allowed.contains(domain),
+                                onClick = {
+                                    if (allowed.contains(domain)) allowed.remove(domain)
+                                    else {
+                                        allowed.add(domain)
+                                        blocked.remove(domain)
+                                    }
+                                },
+                                label = { Text("Allow") }
+                            )
+                        }
+                    }
+                )
+            }
+        }
+
+        Button(
+            onClick = { onSave(name, blocked.toSet(), allowed.toSet()) },
+            enabled = name.isNotBlank(),
+            modifier = Modifier.fillMaxWidth().padding(16.dp)
+        ) {
+            Text("Save Predefinition")
+        }
     }
 }
 

@@ -39,7 +39,11 @@ class HostManager(private val context: Context) {
         return false
     }
 
-    suspend fun reload(sources: List<HostSource>, forceDownload: Boolean = true) = withContext(Dispatchers.IO) {
+    suspend fun reload(
+        sources: List<HostSource>,
+        predefinitions: List<com.hfilter.model.AppPredefinition> = emptyList(),
+        forceDownload: Boolean = true
+    ) = withContext(Dispatchers.IO) {
         _isLoading.value = true
         val enabledSources = sources.filter { it.enabled }
         val total = enabledSources.size
@@ -67,10 +71,25 @@ class HostManager(private val context: Context) {
 
         // Step 2: Clear memory and parse all enabled local files
         blockedDomains.clear()
+
+        // Apply enabled app predefinitions
+        predefinitions.filter { it.enabled }.forEach { pred ->
+            blockedDomains.addAll(pred.blockedDomains.map { it.lowercase() })
+            // Note: Allowed domains in predefinitions should override blocked domains in hosts?
+            // "bloqueio mais eficiente" - maybe handle white-listing
+        }
+
         enabledSources.forEach { source ->
             val localFile = getLocalFileForSource(source)
             if (localFile.exists()) {
                 parseLocalFile(localFile)
+            }
+        }
+
+        // Final pass: ensure allowed domains are NOT in the blocked list
+        predefinitions.filter { it.enabled }.forEach { pred ->
+            pred.allowedDomains.forEach { domain ->
+                blockedDomains.remove(domain.lowercase())
             }
         }
 

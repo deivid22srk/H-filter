@@ -19,6 +19,8 @@ class SettingsManager(private val context: Context) {
     private val AUTO_UPDATE_KEY = androidx.datastore.preferences.core.booleanPreferencesKey("auto_update")
     private val START_ON_BOOT_KEY = androidx.datastore.preferences.core.booleanPreferencesKey("start_on_boot")
     private val DNS_LOGGING_KEY = androidx.datastore.preferences.core.booleanPreferencesKey("dns_logging")
+    private val APP_PREDEFINITIONS_KEY = stringPreferencesKey("app_predefinitions")
+    private val CAPTURE_SESSION_APPS_KEY = stringPreferencesKey("capture_session_apps")
 
     val vpnEnabled: Flow<Boolean> = context.dataStore.data.map { it[VPN_ENABLED_KEY] ?: false }
     val autoUpdate: Flow<Boolean> = context.dataStore.data.map { it[AUTO_UPDATE_KEY] ?: false }
@@ -39,6 +41,29 @@ class SettingsManager(private val context: Context) {
 
     suspend fun setDnsLogging(enabled: Boolean) {
         context.dataStore.edit { it[DNS_LOGGING_KEY] = enabled }
+    }
+
+    val appPredefinitions: Flow<List<com.hfilter.model.AppPredefinition>> = context.dataStore.data.map { preferences ->
+        val json = preferences[APP_PREDEFINITIONS_KEY]
+        if (json == null) {
+            emptyList()
+        } else {
+            val type = object : TypeToken<List<com.hfilter.model.AppPredefinition>>() {}.type
+            gson.fromJson(json, type)
+        }
+    }
+
+    suspend fun saveAppPredefinitions(list: List<com.hfilter.model.AppPredefinition>) {
+        context.dataStore.edit { it[APP_PREDEFINITIONS_KEY] = gson.toJson(list) }
+    }
+
+    val captureSessionApps: Flow<List<String>> = context.dataStore.data.map { preferences ->
+        val json = preferences[CAPTURE_SESSION_APPS_KEY]
+        if (json == null) emptyList() else gson.fromJson(json, object : TypeToken<List<String>>() {}.type)
+    }
+
+    suspend fun setCaptureSessionApps(apps: List<String>) {
+        context.dataStore.edit { it[CAPTURE_SESSION_APPS_KEY] = gson.toJson(apps) }
     }
 
     val hostSources: Flow<List<HostSource>> = context.dataStore.data.map { preferences ->

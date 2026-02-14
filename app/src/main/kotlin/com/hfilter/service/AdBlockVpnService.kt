@@ -16,6 +16,7 @@ import com.hfilter.util.HostManager
 import com.hfilter.util.LogManager
 import com.hfilter.util.SettingsManager
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -31,6 +32,7 @@ class AdBlockVpnService : VpnService() {
     private lateinit var settingsManager: SettingsManager
     private val executor = Executors.newFixedThreadPool(15)
     private var isRunning = false
+    private var isCaptureMode = false
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     companion object {
@@ -45,9 +47,11 @@ class AdBlockVpnService : VpnService() {
 
         serviceScope.launch {
             hostManager.loadFromCache()
-            // Observe host sources changes
-            settingsManager.hostSources.collect { sources ->
-                hostManager.reload(sources, forceDownload = false)
+            // Observe host sources and app predefinitions changes
+            combine(settingsManager.hostSources, settingsManager.appPredefinitions) { sources, preds ->
+                sources to preds
+            }.collect { (sources, preds) ->
+                hostManager.reload(sources, preds, forceDownload = false)
             }
         }
         createNotificationChannel()
@@ -85,6 +89,19 @@ class AdBlockVpnService : VpnService() {
                 .addRoute("8.8.8.8", 32)
                 .addRoute("8.8.4.4", 32)
                 .addRoute("1.1.1.1", 32)
+
+            val captureApps = runBlocking { settingsManager.captureSessionApps.first() }
+            isCaptureMode = captureApps.isNotEmpty()
+
+            if (isCaptureMode) {
+                captureApps.forEach {
+                    try {
+                        builder.addAllowedApplication(it)
+                    } catch (e: Exception) {
+                        Log.e("AdBlockVpn", "Failed to add allowed app: $it", e)
+                    }
+                }
+            }
 
             vpnInterface = builder.establish()
             if (vpnInterface == null) {
@@ -140,7 +157,13 @@ class AdBlockVpnService : VpnService() {
 
     private fun handleDnsQuery(dnsData: ByteArray, srcIp: ByteArray, dstIp: ByteArray, srcPort: Int, dstPort: Int, output: FileOutputStream) {
         val domain = parseDnsDomain(dnsData)
-        if (domain != null && hostManager.isBlocked(domain)) {
+        if (domain == null) return
+
+        if (isCaptureMode) {
+            LogManager.addSessionLog(domain)
+        }
+
+        if (hostManager.isBlocked(domain)) {
             Log.d("AdBlockVpn", "Blocked: $domain")
             serviceScope.launch {
                 if (settingsManager.dnsLogging.first()) {
@@ -150,11 +173,9 @@ class AdBlockVpnService : VpnService() {
             val forgedResponse = forgeDnsResponse(dnsData)
             sendUdpPacket(forgedResponse, dstIp, srcIp, dstPort, srcPort, output)
         } else {
-            if (domain != null) {
-                serviceScope.launch {
-                    if (settingsManager.dnsLogging.first()) {
-                        LogManager.addLog(domain, false)
-                    }
+            serviceScope.launch {
+                if (settingsManager.dnsLogging.first()) {
+                    LogManager.addLog(domain, false)
                 }
             }
             executor.execute {

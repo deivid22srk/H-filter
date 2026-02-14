@@ -14,6 +14,9 @@ object LogManager {
     private val _logs = MutableStateFlow<List<DnsLogEntry>>(emptyList())
     val logs: StateFlow<List<DnsLogEntry>> = _logs
 
+    private val _sessionLogs = MutableStateFlow<Set<String>>(emptySet())
+    val sessionLogs: StateFlow<Set<String>> = _sessionLogs
+
     fun addLog(domain: String, blocked: Boolean) {
         val entry = DnsLogEntry(domain = domain, blocked = blocked)
         val current = _logs.value.toMutableList()
@@ -22,6 +25,16 @@ object LogManager {
             current.removeAt(current.size - 1)
         }
         _logs.value = current
+    }
+
+    fun addSessionLog(domain: String) {
+        val current = _sessionLogs.value.toMutableSet()
+        current.add(domain)
+        _sessionLogs.value = current
+    }
+
+    fun clearSessionLogs() {
+        _sessionLogs.value = emptySet()
     }
 
     fun clear() {
