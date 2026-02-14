@@ -260,9 +260,10 @@ fun MainApp(
                     settingsManager,
                     onExport = onExport,
                     onImport = onImport,
-                    onVpnToggle = onVpnToggle
+                    onVpnToggle = onVpnToggle,
+                    vpnActive = vpnActive
                 )
-                3 -> SettingsScreen(settingsManager)
+                3 -> SettingsScreen(settingsManager, onVpnToggle, vpnActive)
             }
             }
         }
@@ -648,7 +649,8 @@ fun AppFilterScreen(
     settingsManager: SettingsManager,
     onExport: () -> Unit,
     onImport: () -> Unit,
-    onVpnToggle: (Boolean) -> Unit
+    onVpnToggle: (Boolean) -> Unit,
+    vpnActive: Boolean
 ) {
     val predefinitions by settingsManager.appPredefinitions.collectAsState(initial = emptyList())
     val captureApps by settingsManager.captureSessionApps.collectAsState(initial = emptyList())
@@ -665,12 +667,31 @@ fun AppFilterScreen(
         AppSelectionScreen(
             onBack = { showAppSelection = false },
             onStartCapture = { apps, blockInternet ->
-                scope.launch {
-                    settingsManager.setCaptureSessionApps(apps)
-                    settingsManager.setCaptureSessionBlockInternet(blockInternet)
-                    LogManager.clearSessionLogs()
-                    onVpnToggle(true)
-                    showAppSelection = false
+                if (blockInternet) {
+                    scope.launch {
+                        val names = apps.map { pkg ->
+                            try { pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString() }
+                            catch (e: Exception) { pkg }
+                        }
+                        val name = if (names.size > 2) "${names.take(2).joinToString(", ")} +${names.size - 2}"
+                        else names.joinToString(", ")
+
+                        val newPred = AppPredefinition(
+                            name = name,
+                            packageNames = apps,
+                            blockInternet = true
+                        )
+                        settingsManager.saveAppPredefinitions(predefinitions + newPred)
+                        showAppSelection = false
+                    }
+                } else {
+                    scope.launch {
+                        settingsManager.setCaptureSessionApps(apps)
+                        settingsManager.setCaptureSessionBlockInternet(false)
+                        LogManager.clearSessionLogs()
+                        onVpnToggle(true)
+                        showAppSelection = false
+                    }
                 }
             }
         )
@@ -813,7 +834,18 @@ fun AppFilterScreen(
                             }
                         },
                         trailingContent = {
-                            Row {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Switch(
+                                    checked = pred.blockInternet,
+                                    onCheckedChange = { checked ->
+                                        scope.launch {
+                                            val updated = pred.copy(blockInternet = checked)
+                                            settingsManager.saveAppPredefinitions(predefinitions.map { if (it.id == updated.id) updated else it })
+                                            if (vpnActive) onVpnToggle(true)
+                                        }
+                                    }
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
                                 IconButton(onClick = {
                                     recapturingPredefinition = pred
                                     scope.launch {
@@ -917,7 +949,7 @@ fun AppSelectionScreen(onBack: () -> Unit, onStartCapture: (List<String>, Boolea
             enabled = selectedApps.isNotEmpty(),
             modifier = Modifier.fillMaxWidth().padding(16.dp)
         ) {
-            Text(if (blockInternet) "Start Blocked Capture" else "Start Capture")
+            Text(if (blockInternet) "Block Internet & Save" else "Start Capture")
         }
     }
 }
@@ -1030,7 +1062,11 @@ fun ReviewCaptureScreen(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(settingsManager: SettingsManager) {
+fun SettingsScreen(
+    settingsManager: SettingsManager,
+    onVpnToggle: (Boolean) -> Unit,
+    vpnActive: Boolean
+) {
     val autoUpdate by settingsManager.autoUpdate.collectAsState(initial = false)
     val startOnBoot by settingsManager.startOnBoot.collectAsState(initial = false)
     val filteringMode by settingsManager.filteringMode.collectAsState(initial = FilteringMode.BOTH)
@@ -1064,17 +1100,32 @@ fun SettingsScreen(settingsManager: SettingsManager) {
                 SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
                     SegmentedButton(
                         selected = filteringMode == FilteringMode.GLOBAL,
-                        onClick = { scope.launch { settingsManager.setFilteringMode(FilteringMode.GLOBAL) } },
+                        onClick = {
+                            scope.launch {
+                                settingsManager.setFilteringMode(FilteringMode.GLOBAL)
+                                if (vpnActive) onVpnToggle(true)
+                            }
+                        },
                         shape = SegmentedButtonDefaults.itemShape(index = 0, count = 3)
                     ) { Text("Global") }
                     SegmentedButton(
                         selected = filteringMode == FilteringMode.APPS,
-                        onClick = { scope.launch { settingsManager.setFilteringMode(FilteringMode.APPS) } },
+                        onClick = {
+                            scope.launch {
+                                settingsManager.setFilteringMode(FilteringMode.APPS)
+                                if (vpnActive) onVpnToggle(true)
+                            }
+                        },
                         shape = SegmentedButtonDefaults.itemShape(index = 1, count = 3)
                     ) { Text("Apps") }
                     SegmentedButton(
                         selected = filteringMode == FilteringMode.BOTH,
-                        onClick = { scope.launch { settingsManager.setFilteringMode(FilteringMode.BOTH) } },
+                        onClick = {
+                            scope.launch {
+                                settingsManager.setFilteringMode(FilteringMode.BOTH)
+                                if (vpnActive) onVpnToggle(true)
+                            }
+                        },
                         shape = SegmentedButtonDefaults.itemShape(index = 2, count = 3)
                     ) { Text("Both") }
                 }
@@ -1117,7 +1168,10 @@ fun SettingsScreen(settingsManager: SettingsManager) {
                         trailingContent = {
                             if (dnsServers.size > 1) {
                                 IconButton(onClick = {
-                                    scope.launch { settingsManager.saveDnsServers(dnsServers.filter { it != ip }) }
+                                    scope.launch {
+                                        settingsManager.saveDnsServers(dnsServers.filter { it != ip })
+                                        if (vpnActive) onVpnToggle(true)
+                                    }
                                 }) {
                                     Icon(Icons.Default.Delete, contentDescription = "Remove", tint = MaterialTheme.colorScheme.error)
                                 }
@@ -1238,6 +1292,7 @@ fun SettingsScreen(settingsManager: SettingsManager) {
                     if (newDnsIp.isNotBlank()) {
                         scope.launch {
                             settingsManager.saveDnsServers(dnsServers + newDnsIp.trim())
+                            if (vpnActive) onVpnToggle(true)
                             newDnsIp = ""
                             showDnsDialog = false
                         }
