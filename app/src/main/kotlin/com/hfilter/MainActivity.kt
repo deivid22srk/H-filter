@@ -23,11 +23,16 @@ import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import com.hfilter.model.HostSource
+import com.hfilter.model.FilterResponse
+import com.hfilter.model.FilterItem
 import com.hfilter.service.AdBlockVpnService
 import com.hfilter.ui.theme.HfilterTheme
 import com.hfilter.util.HostManager
 import com.hfilter.util.SettingsManager
 import kotlinx.coroutines.launch
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import com.google.gson.Gson
 
 class MainActivity : ComponentActivity() {
     private lateinit var settingsManager: SettingsManager
@@ -158,9 +163,118 @@ fun MainApp(
                     scope.launch {
                         hostManager.reload(hostSources)
                     }
+                }, onAddSelected = { items ->
+                    scope.launch {
+                        val newSources = items.map { HostSource(name = it.name, url = it.link) }
+                        settingsManager.addHostSources(newSources)
+                    }
                 })
                 2 -> SettingsScreen(settingsManager)
             }
+        }
+    }
+}
+
+@Composable
+fun ExploreFiltersScreen(
+    onAdd: (String, String) -> Unit,
+    onAddSelected: (List<FilterItem>) -> Unit
+) {
+    var filters by remember { mutableStateOf<FilterResponse?>(null) }
+    var isLoading by remember { mutableStateOf(true) }
+    val selectedItems = remember { mutableStateListOf<FilterItem>() }
+    val scope = rememberCoroutineScope()
+
+    LaunchedEffect(Unit) {
+        scope.launch(Dispatchers.IO) {
+            try {
+                val client = OkHttpClient()
+                val request = Request.Builder()
+                    .url("https://raw.githubusercontent.com/deivid22srk/H-filter-Host/refs/heads/main/hosts_e_filtros.json")
+                    .build()
+                client.newCall(request).execute().use { response ->
+                    if (response.isSuccessful) {
+                        val json = response.body?.string()
+                        filters = Gson().fromJson(json, FilterResponse::class.java)
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            } finally {
+                isLoading = false
+            }
+        }
+    }
+
+    if (isLoading) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            CircularProgressIndicator()
+        }
+    } else if (filters != null) {
+        val allItems = remember(filters) {
+            val list = mutableListOf<Pair<String, List<FilterItem>>>()
+            filters?.let {
+                if (it.stevenBlackHosts.isNotEmpty()) list.add("StevenBlack Hosts" to it.stevenBlackHosts)
+                if (it.oneDmHost.isNotEmpty()) list.add("1DM Hosts" to it.oneDmHost)
+                if (it.filters.isNotEmpty()) list.add("General Filters" to it.filters)
+            }
+            list
+        }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(bottom = 80.dp)
+        ) {
+            allItems.forEach { (category, items) ->
+                item {
+                    Text(
+                        text = category,
+                        style = MaterialTheme.typography.titleSmall,
+                        modifier = Modifier.padding(16.dp),
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                items(items) { item ->
+                    ListItem(
+                        headlineContent = { Text(item.name) },
+                        supportingContent = { Text(item.link, maxLines = 1) },
+                        leadingContent = {
+                            Checkbox(
+                                checked = selectedItems.contains(item),
+                                onCheckedChange = { checked ->
+                                    if (checked) selectedItems.add(item) else selectedItems.remove(item)
+                                }
+                            )
+                        },
+                        trailingContent = {
+                            IconButton(onClick = { onAdd(item.name, item.link) }) {
+                                Icon(Icons.Default.Add, contentDescription = "Add")
+                            }
+                        }
+                    )
+                }
+            }
+        }
+
+        if (selectedItems.isNotEmpty()) {
+            ExtendedFloatingActionButton(
+                onClick = {
+                    onAddSelected(selectedItems.toList())
+                    selectedItems.clear()
+                },
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(16.dp)
+                    .padding(bottom = 80.dp), // Avoid navigation bar
+                icon = { Icon(Icons.Default.Add, contentDescription = null) },
+                text = { Text("Add Selected (${selectedItems.size})") }
+            )
+        }
+    }
+    } else {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text("Failed to load filters")
         }
     }
 }
@@ -236,10 +350,12 @@ fun HostsScreen(
     sources: List<HostSource>,
     downloadProgress: Float?,
     onAdd: (String, String) -> Unit,
+    onAddSelected: (List<FilterItem>) -> Unit,
     onToggle: (HostSource) -> Unit,
     onDelete: (HostSource) -> Unit,
     onReload: () -> Unit
 ) {
+    var subTab by remember { mutableIntStateOf(0) }
     var showDialog by remember { mutableStateOf(false) }
     var newName by remember { mutableStateOf("") }
     var newUrl by remember { mutableStateOf("") }
@@ -251,49 +367,58 @@ fun HostsScreen(
                 modifier = Modifier.fillMaxWidth(),
             )
         }
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text("Host Sources", style = MaterialTheme.typography.titleLarge)
-            IconButton(onClick = onReload) {
-                Icon(Icons.Default.Refresh, contentDescription = "Reload")
-            }
+        TabRow(selectedTabIndex = subTab) {
+            Tab(selected = subTab == 0, onClick = { subTab = 0 }, text = { Text("My Hosts") })
+            Tab(selected = subTab == 1, onClick = { subTab = 1 }, text = { Text("Explore") })
         }
 
-        LazyColumn(
-            modifier = Modifier.weight(1f),
-            contentPadding = PaddingValues(bottom = 80.dp)
-        ) {
-            items(sources) { source ->
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 4.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = if (source.enabled) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.surface
-                    )
-                ) {
-                    ListItem(
-                        headlineContent = { Text(source.name, style = MaterialTheme.typography.titleMedium) },
-                        supportingContent = { Text(source.url, maxLines = 1, style = MaterialTheme.typography.bodySmall) },
-                        trailingContent = {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Switch(checked = source.enabled, onCheckedChange = { onToggle(source) })
-                                if (source.type == com.hfilter.model.SourceType.USER) {
-                                    IconButton(onClick = { onDelete(source) }) {
-                                        Icon(Icons.Default.Delete, contentDescription = null)
-                                    }
-                                }
-                            }
-                        },
-                        colors = ListItemDefaults.colors(containerColor = androidx.compose.ui.graphics.Color.Transparent)
-                    )
+        if (subTab == 0) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Host Sources", style = MaterialTheme.typography.titleLarge)
+                IconButton(onClick = onReload) {
+                    Icon(Icons.Default.Refresh, contentDescription = "Reload")
                 }
             }
+
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(bottom = 80.dp)
+            ) {
+                items(sources) { source ->
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 4.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = if (source.enabled) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.surface
+                        )
+                    ) {
+                        ListItem(
+                            headlineContent = { Text(source.name, style = MaterialTheme.typography.titleMedium) },
+                            supportingContent = { Text(source.url, maxLines = 1, style = MaterialTheme.typography.bodySmall) },
+                            trailingContent = {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Switch(checked = source.enabled, onCheckedChange = { onToggle(source) })
+                                    if (source.type == com.hfilter.model.SourceType.USER) {
+                                        IconButton(onClick = { onDelete(source) }) {
+                                            Icon(Icons.Default.Delete, contentDescription = null)
+                                        }
+                                    }
+                                }
+                            },
+                            colors = ListItemDefaults.colors(containerColor = androidx.compose.ui.graphics.Color.Transparent)
+                        )
+                    }
+                }
+            }
+        } else {
+            ExploreFiltersScreen(onAdd = onAdd, onAddSelected = onAddSelected)
         }
 
         FloatingActionButton(

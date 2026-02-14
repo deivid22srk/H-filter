@@ -53,4 +53,21 @@ class SettingsManager(private val context: Context) {
             preferences[HOST_SOURCES_KEY] = gson.toJson(sources)
         }
     }
+
+    suspend fun addHostSources(newSources: List<HostSource>) {
+        context.dataStore.edit { preferences ->
+            val json = preferences[HOST_SOURCES_KEY]
+            val currentList = if (json == null) {
+                listOf(
+                    HostSource(name = "StevenBlack Hosts", url = "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts", type = com.hfilter.model.SourceType.BUILT_IN),
+                    HostSource(name = "HaGeZi Ultimate", url = "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/ultimate.txt", type = com.hfilter.model.SourceType.BUILT_IN)
+                )
+            } else {
+                val type = object : TypeToken<List<HostSource>>() {}.type
+                gson.fromJson<List<HostSource>>(json, type)
+            }
+            val updatedList = currentList + newSources
+            preferences[HOST_SOURCES_KEY] = gson.toJson(updatedList)
+        }
+    }
 }
