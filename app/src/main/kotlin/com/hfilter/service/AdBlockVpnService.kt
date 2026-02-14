@@ -21,17 +21,15 @@ import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
 import java.nio.ByteBuffer
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 
 class AdBlockVpnService : VpnService() {
     private var vpnInterface: ParcelFileDescriptor? = null
     private lateinit var hostManager: HostManager
     private lateinit var settingsManager: SettingsManager
-    private val executor = Executors.newFixedThreadPool(10)
+    private val executor = Executors.newFixedThreadPool(15)
     private var isRunning = false
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    private lateinit var dnsForwarderSocket: DatagramSocket
 
     companion object {
         const val CHANNEL_ID = "vpn_channel"
@@ -45,8 +43,6 @@ class AdBlockVpnService : VpnService() {
             hostManager.loadFromCache()
         }
         settingsManager = SettingsManager(this)
-        dnsForwarderSocket = DatagramSocket()
-        protect(dnsForwarderSocket)
         createNotificationChannel()
     }
 
@@ -139,22 +135,28 @@ class AdBlockVpnService : VpnService() {
         val domain = parseDnsDomain(dnsData)
         if (domain != null && hostManager.isBlocked(domain)) {
             Log.d("AdBlockVpn", "Blocked: $domain")
-            val forgedResponse = forgeDnsResponse(dnsData, domain, true)
+            val forgedResponse = forgeDnsResponse(dnsData)
             sendUdpPacket(forgedResponse, dstIp, srcIp, dstPort, srcPort, output)
         } else {
             executor.execute {
+                var socket: DatagramSocket? = null
                 try {
+                    socket = DatagramSocket()
+                    protect(socket)
+                    socket.soTimeout = 5000
                     val forwardPacket = DatagramPacket(dnsData, dnsData.size, InetAddress.getByAddress(dstIp), 53)
-                    dnsForwarderSocket.send(forwardPacket)
+                    socket.send(forwardPacket)
 
-                    val responseData = ByteArray(1024)
+                    val responseData = ByteArray(1500)
                     val responsePacket = DatagramPacket(responseData, responseData.size)
-                    dnsForwarderSocket.receive(responsePacket)
+                    socket.receive(responsePacket)
 
                     val actualResponse = responsePacket.data.copyOfRange(0, responsePacket.length)
                     sendUdpPacket(actualResponse, dstIp, srcIp, dstPort, srcPort, output)
                 } catch (e: Exception) {
                     Log.e("AdBlockVpn", "DNS forward error for $domain", e)
+                } finally {
+                    socket?.close()
                 }
             }
         }
@@ -177,14 +179,17 @@ class AdBlockVpnService : VpnService() {
         packet.put(dstIp)
 
         // Update IP Checksum
-        val ipChecksum = calculateChecksum(packet.array(), 20)
+        val ipChecksum = calculateChecksum(packet.array(), 0, 20)
         packet.putShort(10, ipChecksum)
 
         // UDP Header
         packet.putShort(srcPort.toShort())
         packet.putShort(dstPort.toShort())
-        packet.putShort((8 + payload.size).toShort())
-        packet.putShort(0.toShort()) // Checksum (optional for IPv4)
+        val udpLen = (8 + payload.size).toShort()
+        packet.putShort(udpLen)
+
+        // Calculate UDP Checksum (including pseudo-header)
+        packet.putShort(calculateUdpChecksum(payload, srcIp, dstIp, srcPort, dstPort))
 
         packet.put(payload)
 
@@ -193,14 +198,36 @@ class AdBlockVpnService : VpnService() {
         }
     }
 
-    private fun calculateChecksum(buffer: ByteArray, length: Int): Short {
+    private fun calculateUdpChecksum(payload: ByteArray, srcIp: ByteArray, dstIp: ByteArray, srcPort: Int, dstPort: Int): Short {
+        val udpLen = 8 + payload.size
+        val pseudoHeaderSize = 12 + udpLen
+        val buffer = ByteBuffer.allocate(pseudoHeaderSize)
+
+        buffer.put(srcIp)
+        buffer.put(dstIp)
+        buffer.put(0.toByte())
+        buffer.put(17.toByte()) // Protocol UDP
+        buffer.putShort(udpLen.toShort())
+
+        buffer.putShort(srcPort.toShort())
+        buffer.putShort(dstPort.toShort())
+        buffer.putShort(udpLen.toShort())
+        buffer.putShort(0.toShort()) // Checksum placeholder
+
+        buffer.put(payload)
+
+        return calculateChecksum(buffer.array(), 0, buffer.position())
+    }
+
+    private fun calculateChecksum(buffer: ByteArray, offset: Int, length: Int): Short {
         var sum = 0
-        var i = 0
-        while (i < length - 1) {
-            sum += (buffer[i].toInt() and 0xFF shl 8) or (buffer[i + 1].toInt() and 0xFF)
+        var i = offset
+        val end = offset + length
+        while (i < end - 1) {
+            sum += ((buffer[i].toInt() and 0xFF) shl 8) or (buffer[i + 1].toInt() and 0xFF)
             i += 2
         }
-        if (i < length) {
+        if (i < end) {
             sum += (buffer[i].toInt() and 0xFF) shl 8
         }
         while (sum shr 16 != 0) {
@@ -209,33 +236,29 @@ class AdBlockVpnService : VpnService() {
         return (sum.inv() and 0xFFFF).toShort()
     }
 
-    private fun forgeDnsResponse(queryData: ByteArray, domain: String, blocked: Boolean): ByteArray {
+    private fun forgeDnsResponse(queryData: ByteArray): ByteArray {
         val queryBuffer = ByteBuffer.wrap(queryData)
         val response = ByteBuffer.allocate(queryData.size + 16)
         response.put(queryData.copyOfRange(0, 2)) // ID
-        response.put(0x81.toByte()) // Flags: QR, Opcode, AA, TC, RD
-        response.put(0x80.toByte()) // Flags: RA, Z, RCODE (Success)
+
+        // Flags: QR=1 (Response), Opcode=0, AA=1, TC=0, RD=1, RA=1, Z=0, RCODE=3 (NXDOMAIN)
+        response.put(0x85.toByte())
+        response.put(0x83.toByte())
+
         response.putShort(queryBuffer.getShort(4)) // QDCOUNT
-        response.putShort(1.toShort()) // ANCOUNT
+        response.putShort(0.toShort()) // ANCOUNT
         response.putShort(0.toShort()) // NSCOUNT
         response.putShort(0.toShort()) // ARCOUNT
 
-        // Question section (copy from query)
+        // Copy Question section
         var pos = 12
         while (pos < queryData.size && queryData[pos] != 0.toByte()) {
             pos += (queryData[pos].toInt() and 0xFF) + 1
         }
         pos += 5 // Null terminator + QTYPE + QCLASS
-        response.put(queryData.copyOfRange(12, pos))
-
-        // Answer section
-        response.put(0xC0.toByte()) // Name pointer to offset 12
-        response.put(0x0C.toByte())
-        response.putShort(1.toShort()) // Type A
-        response.putShort(1.toShort()) // Class IN
-        response.putInt(60) // TTL
-        response.putShort(4.toShort()) // Data length
-        response.put(byteArrayOf(0, 0, 0, 0)) // IP 0.0.0.0
+        if (pos <= queryData.size) {
+            response.put(queryData.copyOfRange(12, pos))
+        }
 
         return response.array().copyOfRange(0, response.position())
     }
@@ -314,7 +337,6 @@ class AdBlockVpnService : VpnService() {
 
     override fun onDestroy() {
         stopVpn()
-        dnsForwarderSocket.close()
         serviceScope.cancel()
         super.onDestroy()
     }
