@@ -41,10 +41,15 @@ class AdBlockVpnService : VpnService() {
     override fun onCreate() {
         super.onCreate()
         hostManager = HostManager(this)
+        settingsManager = SettingsManager(this)
+
         serviceScope.launch {
             hostManager.loadFromCache()
+            // Observe host sources changes
+            settingsManager.hostSources.collect { sources ->
+                hostManager.reload(sources, forceDownload = false)
+            }
         }
-        settingsManager = SettingsManager(this)
         createNotificationChannel()
     }
 

@@ -159,6 +159,7 @@ fun MainApp(
                     scope.launch {
                         val newList = hostSources + HostSource(name = name, url = url)
                         settingsManager.saveHostSources(newList)
+                        hostManager.reload(newList, forceDownload = true)
                     }
                 }, onToggle = { source ->
                     scope.launch {
@@ -166,20 +167,24 @@ fun MainApp(
                             if (it.id == source.id) it.copy(enabled = !it.enabled) else it
                         }
                         settingsManager.saveHostSources(newList)
+                        hostManager.reload(newList, forceDownload = false)
                     }
                 }, onDelete = { source ->
                     scope.launch {
                         val newList = hostSources.filter { it.id != source.id }
                         settingsManager.saveHostSources(newList)
+                        hostManager.reload(newList, forceDownload = false)
                     }
                 }, onReload = {
                     scope.launch {
-                        hostManager.reload(hostSources)
+                        hostManager.reload(hostSources, forceDownload = true)
                     }
                 }, onAddSelected = { items ->
                     scope.launch {
                         val newSources = items.map { HostSource(name = it.name, url = it.link) }
                         settingsManager.addHostSources(newSources)
+                        val fullList = hostSources + newSources
+                        hostManager.reload(fullList, forceDownload = true)
                     }
                 })
                 2 -> SettingsScreen(settingsManager)
