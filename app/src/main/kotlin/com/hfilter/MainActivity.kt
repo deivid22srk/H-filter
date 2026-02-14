@@ -12,6 +12,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -25,6 +26,7 @@ import kotlinx.coroutines.flow.first
 import com.hfilter.model.HostSource
 import com.hfilter.model.FilterResponse
 import com.hfilter.model.FilterItem
+import com.hfilter.util.LogManager
 import com.hfilter.service.AdBlockVpnService
 import com.hfilter.ui.theme.HfilterTheme
 import com.hfilter.util.HostManager
@@ -99,6 +101,7 @@ fun MainApp(
     onVpnToggle: (Boolean) -> Unit
 ) {
     var selectedTab by remember { mutableIntStateOf(0) }
+    var showDnsLogs by remember { mutableStateOf(false) }
     val hostSources by settingsManager.hostSources.collectAsState(initial = emptyList())
     val downloadProgress by hostManager.downloadProgress.collectAsState()
     val scope = rememberCoroutineScope()
@@ -108,7 +111,14 @@ fun MainApp(
         modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
             LargeTopAppBar(
-                title = { Text("H-filter") },
+                title = { Text(if (showDnsLogs) "DNS Request Logs" else "H-filter") },
+                navigationIcon = {
+                    if (showDnsLogs) {
+                        IconButton(onClick = { showDnsLogs = false }) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        }
+                    }
+                },
                 scrollBehavior = scrollBehavior,
                 colors = TopAppBarDefaults.largeTopAppBarColors(
                     containerColor = MaterialTheme.colorScheme.surface,
@@ -140,8 +150,11 @@ fun MainApp(
         }
     ) { padding ->
         Column(modifier = Modifier.padding(padding)) {
+            if (showDnsLogs) {
+                DnsLogScreen(settingsManager)
+            } else {
             when (selectedTab) {
-                0 -> HomeScreen(hostManager, vpnActive, onVpnToggle)
+                0 -> HomeScreen(hostManager, vpnActive, onVpnToggle, onShowLogs = { showDnsLogs = true })
                 1 -> HostsScreen(hostSources, downloadProgress, onAdd = { name, url ->
                     scope.launch {
                         val newList = hostSources + HostSource(name = name, url = url)
@@ -171,6 +184,57 @@ fun MainApp(
                 })
                 2 -> SettingsScreen(settingsManager)
             }
+            }
+        }
+    }
+}
+
+@Composable
+fun DnsLogScreen(settingsManager: SettingsManager) {
+    val dnsLogging by settingsManager.dnsLogging.collectAsState(initial = false)
+    val logs by LogManager.logs.collectAsState()
+    val scope = rememberCoroutineScope()
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        ListItem(
+            headlineContent = { Text("Enable Logging") },
+            supportingContent = { Text("Record and show DNS requests") },
+            trailingContent = {
+                Switch(
+                    checked = dnsLogging,
+                    onCheckedChange = { scope.launch { settingsManager.setDnsLogging(it) } }
+                )
+            }
+        )
+        HorizontalDivider()
+
+        if (!dnsLogging) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("Logging is disabled", style = MaterialTheme.typography.bodyMedium)
+            }
+        } else if (logs.isEmpty()) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("No logs yet", style = MaterialTheme.typography.bodyMedium)
+            }
+        } else {
+            LazyColumn(modifier = Modifier.fillMaxSize()) {
+                items(logs, key = { it.id }) { log ->
+                    ListItem(
+                        headlineContent = { Text(log.domain) },
+                        supportingContent = {
+                            val date = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(log.timestamp))
+                            Text(date)
+                        },
+                        trailingContent = {
+                            Text(
+                                text = if (log.blocked) "BLOCKED" else "ALLOWED",
+                                color = if (log.blocked) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
+                    )
+                }
+            }
         }
     }
 }
@@ -178,7 +242,8 @@ fun MainApp(
 @Composable
 fun ExploreFiltersScreen(
     onAdd: (String, String) -> Unit,
-    onAddSelected: (List<FilterItem>) -> Unit
+    onAddSelected: (List<FilterItem>) -> Unit,
+    alreadyAddedUrls: Set<String>
 ) {
     var filters by remember { mutableStateOf<FilterResponse?>(null) }
     var isLoading by remember { mutableStateOf(true) }
@@ -235,7 +300,7 @@ fun ExploreFiltersScreen(
                         color = MaterialTheme.colorScheme.primary
                     )
                 }
-                items(items) { item ->
+                items(items.filter { !alreadyAddedUrls.contains(it.link) }) { item ->
                     ListItem(
                         headlineContent = { Text(item.name) },
                         supportingContent = { Text(item.link, maxLines = 1) },
@@ -280,7 +345,10 @@ fun ExploreFiltersScreen(
 }
 
 @Composable
-fun HomeScreen(hostManager: HostManager, vpnActive: Boolean, onVpnToggle: (Boolean) -> Unit) {
+fun HomeScreen(hostManager: HostManager, vpnActive: Boolean, onVpnToggle: (Boolean) -> Unit, onShowLogs: () -> Unit) {
+    val isLoading by hostManager.isLoading.collectAsState()
+    val blockedCount = hostManager.getBlockedCount()
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -320,27 +388,44 @@ fun HomeScreen(hostManager: HostManager, vpnActive: Boolean, onVpnToggle: (Boole
                 }
                 Spacer(modifier = Modifier.height(16.dp))
                 Text(
-                    text = "${hostManager.getBlockedCount()} domains blocked",
-                    style = MaterialTheme.typography.bodyMedium
+                    text = "$blockedCount domains in blocklist",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (vpnActive) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }
 
-        Surface(
-            onClick = { onVpnToggle(!vpnActive) },
-            modifier = Modifier.size(160.dp),
-            shape = MaterialTheme.shapes.extraLarge,
-            color = if (vpnActive) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
-            tonalElevation = 8.dp
-        ) {
-            Box(contentAlignment = Alignment.Center) {
-                Icon(
-                    if (vpnActive) Icons.Default.PowerSettingsNew else Icons.Default.PlayArrow,
-                    contentDescription = null,
-                    modifier = Modifier.size(64.dp),
-                    tint = if (vpnActive) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
-                )
+        if (isLoading) {
+            CircularProgressIndicator(modifier = Modifier.padding(bottom = 32.dp))
+            Text("Loading blocklists...", style = MaterialTheme.typography.bodySmall)
+        } else {
+            Surface(
+                onClick = { onVpnToggle(!vpnActive) },
+                modifier = Modifier.size(160.dp),
+                shape = MaterialTheme.shapes.extraLarge,
+                color = if (vpnActive) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                tonalElevation = 8.dp
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        if (vpnActive) Icons.Default.PowerSettingsNew else Icons.Default.PlayArrow,
+                        contentDescription = null,
+                        modifier = Modifier.size(64.dp),
+                        tint = if (vpnActive) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
+        }
+
+        Spacer(modifier = Modifier.height(48.dp))
+
+        OutlinedButton(
+            onClick = onShowLogs,
+            modifier = Modifier.fillMaxWidth(0.7f)
+        ) {
+            Icon(Icons.Default.History, contentDescription = null)
+            Spacer(modifier = Modifier.width(8.dp))
+            Text("DNS Request Logs")
         }
     }
 }
@@ -360,6 +445,7 @@ fun HostsScreen(
     var newName by remember { mutableStateOf("") }
     var newUrl by remember { mutableStateOf("") }
 
+    Box(modifier = Modifier.fillMaxSize()) {
     Column(modifier = Modifier.fillMaxSize()) {
         if (downloadProgress != null) {
             LinearProgressIndicator(
@@ -418,17 +504,25 @@ fun HostsScreen(
                 }
             }
         } else {
-            ExploreFiltersScreen(onAdd = onAdd, onAddSelected = onAddSelected)
+            ExploreFiltersScreen(
+                onAdd = onAdd,
+                onAddSelected = onAddSelected,
+                alreadyAddedUrls = sources.map { it.url }.toSet()
+            )
         }
+    }
 
+    if (subTab == 0) {
         FloatingActionButton(
             onClick = { showDialog = true },
             modifier = Modifier
+                .align(Alignment.BottomEnd)
                 .padding(16.dp)
-                .align(Alignment.End)
+                .padding(bottom = 80.dp)
         ) {
             Icon(Icons.Default.Add, contentDescription = "Add Source")
         }
+    }
     }
 
     if (showDialog) {

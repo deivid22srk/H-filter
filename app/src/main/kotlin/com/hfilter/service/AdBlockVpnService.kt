@@ -13,8 +13,10 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.hfilter.MainActivity
 import com.hfilter.util.HostManager
+import com.hfilter.util.LogManager
 import com.hfilter.util.SettingsManager
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.first
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.net.DatagramPacket
@@ -135,9 +137,21 @@ class AdBlockVpnService : VpnService() {
         val domain = parseDnsDomain(dnsData)
         if (domain != null && hostManager.isBlocked(domain)) {
             Log.d("AdBlockVpn", "Blocked: $domain")
+            serviceScope.launch {
+                if (settingsManager.dnsLogging.first()) {
+                    LogManager.addLog(domain, true)
+                }
+            }
             val forgedResponse = forgeDnsResponse(dnsData)
             sendUdpPacket(forgedResponse, dstIp, srcIp, dstPort, srcPort, output)
         } else {
+            if (domain != null) {
+                serviceScope.launch {
+                    if (settingsManager.dnsLogging.first()) {
+                        LogManager.addLog(domain, false)
+                    }
+                }
+            }
             executor.execute {
                 var socket: DatagramSocket? = null
                 try {

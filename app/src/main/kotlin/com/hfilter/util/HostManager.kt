@@ -20,14 +20,25 @@ class HostManager(private val context: Context) {
     private val _downloadProgress = MutableStateFlow<Float?>(null)
     val downloadProgress: StateFlow<Float?> = _downloadProgress
 
+    private val _isLoading = MutableStateFlow(false)
+    val isLoading: StateFlow<Boolean> = _isLoading
+
     // File to cache the combined blocked domains
     private val cacheFile = File(context.cacheDir, "blocked_domains.txt")
 
     fun isBlocked(domain: String): Boolean {
-        return blockedDomains.contains(domain.lowercase())
+        val lowerDomain = domain.lowercase()
+        if (blockedDomains.contains(lowerDomain)) return true
+
+        // Handle www. prefix
+        if (lowerDomain.startsWith("www.") && blockedDomains.contains(lowerDomain.removePrefix("www."))) return true
+        if (!lowerDomain.startsWith("www.") && blockedDomains.contains("www.$lowerDomain")) return true
+
+        return false
     }
 
     suspend fun reload(sources: List<HostSource>) = withContext(Dispatchers.IO) {
+        _isLoading.value = true
         blockedDomains.clear()
         val enabledSources = sources.filter { it.enabled }
         val total = enabledSources.size
@@ -43,6 +54,7 @@ class HostManager(private val context: Context) {
         _downloadProgress.value = 1.0f
         saveToCache()
         _downloadProgress.value = null
+        _isLoading.value = false
     }
 
     private fun downloadAndParse(url: String) {
@@ -86,6 +98,7 @@ class HostManager(private val context: Context) {
     }
 
     fun loadFromCache() {
+        _isLoading.value = true
         if (cacheFile.exists()) {
             cacheFile.forEachLine { line ->
                 if (line.isNotEmpty()) {
@@ -93,6 +106,7 @@ class HostManager(private val context: Context) {
                 }
             }
         }
+        _isLoading.value = false
     }
 
     fun getBlockedCount(): Int = blockedDomains.size
