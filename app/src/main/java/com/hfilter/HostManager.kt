@@ -73,18 +73,44 @@ class HostManager(private val context: Context) {
     }
 
     internal fun parseHostLine(line: String): String? {
-        val trimmed = line.trim()
-        if (trimmed.isEmpty() || trimmed.startsWith("#")) return null
+        var trimmed = line.trim()
+        if (trimmed.isEmpty() || trimmed.startsWith("#") || trimmed.startsWith("!")) return null
+
+        // Remove trailing comments
+        val commentIndex = trimmed.indexOf('#')
+        if (commentIndex != -1) {
+            trimmed = trimmed.substring(0, commentIndex).trim()
+        }
 
         // Handles formats like "127.0.0.1 domain.com" or just "domain.com"
         val parts = trimmed.split(Regex("\\s+"))
-        return if (parts.size >= 2) {
-            parts[1]
-        } else if (parts.size == 1 && !parts[0].contains(".")) {
-             null
+        val domain = if (parts.size >= 2) {
+            // Check if first part is an IP
+            if (parts[0].matches(Regex("(\\d{1,3}\\.){3}\\d{1,3}"))) {
+                parts[1]
+            } else {
+                // Adblock format often has ||domain.com^
+                cleanAdblockDomain(parts[0])
+            }
         } else {
-            parts[0]
+            cleanAdblockDomain(parts[0])
         }
+
+        return if (domain.contains(".") && !domain.matches(Regex("(\\d{1,3}\\.){3}\\d{1,3}"))) {
+            domain.lowercase()
+        } else {
+            null
+        }
+    }
+
+    private fun cleanAdblockDomain(input: String): String {
+        var domain = input
+        if (domain.startsWith("||")) domain = domain.substring(2)
+        val caretIndex = domain.indexOf('^')
+        if (caretIndex != -1) domain = domain.substring(0, caretIndex)
+        val slashIndex = domain.indexOf('/')
+        if (slashIndex != -1) domain = domain.substring(0, slashIndex)
+        return domain
     }
 
     fun isBlocked(domain: String): Boolean {
