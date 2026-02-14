@@ -96,13 +96,19 @@ class AdBlockVpnService : VpnService() {
     private fun runVpn() {
         while (isRunning) {
             try {
+                val configuredDns = runBlocking { settingsManager.dnsServers.first() }
                 val builder = Builder()
                     .setSession("H-filter")
                     .addAddress("10.0.0.1", 24)
-                    .addDnsServer("8.8.8.8")
-                    .addRoute("8.8.8.8", 32)
-                    .addRoute("8.8.4.4", 32)
-                    .addRoute("1.1.1.1", 32)
+
+                configuredDns.forEach { dns ->
+                    try {
+                        builder.addDnsServer(dns)
+                        builder.addRoute(dns, 32)
+                    } catch (e: Exception) {
+                        Log.e("AdBlockVpn", "Invalid DNS IP: $dns", e)
+                    }
+                }
 
                 val captureApps = runBlocking { settingsManager.captureSessionApps.first() }
                 val captureBlock = runBlocking { settingsManager.captureSessionBlockInternet.first() }

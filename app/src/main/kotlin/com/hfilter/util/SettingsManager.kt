@@ -23,6 +23,7 @@ class SettingsManager(private val context: Context) {
     private val APP_PREDEFINITIONS_KEY = stringPreferencesKey("app_predefinitions")
     private val CAPTURE_SESSION_APPS_KEY = stringPreferencesKey("capture_session_apps")
     private val CAPTURE_SESSION_BLOCK_INTERNET_KEY = androidx.datastore.preferences.core.booleanPreferencesKey("capture_session_block_internet")
+    private val DNS_SERVERS_KEY = stringPreferencesKey("dns_servers")
 
     val vpnEnabled: Flow<Boolean> = context.dataStore.data.map { it[VPN_ENABLED_KEY] ?: false }
     val autoUpdate: Flow<Boolean> = context.dataStore.data.map { it[AUTO_UPDATE_KEY] ?: false }
@@ -80,6 +81,19 @@ class SettingsManager(private val context: Context) {
 
     suspend fun setCaptureSessionBlockInternet(block: Boolean) {
         context.dataStore.edit { it[CAPTURE_SESSION_BLOCK_INTERNET_KEY] = block }
+    }
+
+    val dnsServers: Flow<List<String>> = context.dataStore.data.map { preferences ->
+        val json = preferences[DNS_SERVERS_KEY]
+        if (json == null) {
+            listOf("8.8.8.8", "8.8.4.4", "1.1.1.1")
+        } else {
+            gson.fromJson(json, object : TypeToken<List<String>>() {}.type)
+        }
+    }
+
+    suspend fun saveDnsServers(servers: List<String>) {
+        context.dataStore.edit { it[DNS_SERVERS_KEY] = gson.toJson(servers) }
     }
 
     val hostSources: Flow<List<HostSource>> = context.dataStore.data.map { preferences ->

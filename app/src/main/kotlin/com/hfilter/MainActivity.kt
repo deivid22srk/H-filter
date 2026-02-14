@@ -1034,7 +1034,11 @@ fun SettingsScreen(settingsManager: SettingsManager) {
     val autoUpdate by settingsManager.autoUpdate.collectAsState(initial = false)
     val startOnBoot by settingsManager.startOnBoot.collectAsState(initial = false)
     val filteringMode by settingsManager.filteringMode.collectAsState(initial = FilteringMode.BOTH)
+    val dnsServers by settingsManager.dnsServers.collectAsState(initial = listOf("8.8.8.8", "8.8.4.4", "1.1.1.1"))
     val scope = rememberCoroutineScope()
+    var showDnsDialog by remember { mutableStateOf(false) }
+    var newDnsIp by remember { mutableStateOf("") }
+    val context = LocalContext.current
 
     Column(
         modifier = Modifier
@@ -1088,6 +1092,54 @@ fun SettingsScreen(settingsManager: SettingsManager) {
         }
 
         Text(
+            text = "DNS Configuration",
+            style = MaterialTheme.typography.titleLarge,
+            modifier = Modifier.padding(bottom = 16.dp)
+        )
+
+        Card(
+            modifier = Modifier.fillMaxWidth().padding(bottom = 24.dp),
+            shape = MaterialTheme.shapes.extraLarge,
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
+            border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    "O H-filter utiliza estes servidores DNS para interceptar e filtrar solicitações de anúncios. Apenas o tráfego DNS destinado a estes endereços será processado pelo bloqueador.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+
+                dnsServers.forEach { ip ->
+                    ListItem(
+                        headlineContent = { Text(ip) },
+                        trailingContent = {
+                            if (dnsServers.size > 1) {
+                                IconButton(onClick = {
+                                    scope.launch { settingsManager.saveDnsServers(dnsServers.filter { it != ip }) }
+                                }) {
+                                    Icon(Icons.Default.Delete, contentDescription = "Remove", tint = MaterialTheme.colorScheme.error)
+                                }
+                            }
+                        },
+                        colors = ListItemDefaults.colors(containerColor = androidx.compose.ui.graphics.Color.Transparent)
+                    )
+                }
+
+                Button(
+                    onClick = { showDnsDialog = true },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondaryContainer, contentColor = MaterialTheme.colorScheme.onSecondaryContainer)
+                ) {
+                    Icon(Icons.Default.Add, contentDescription = null)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Add DNS Server")
+                }
+            }
+        }
+
+        Text(
             text = "Preferences",
             style = MaterialTheme.typography.titleLarge,
             modifier = Modifier.padding(bottom = 16.dp)
@@ -1125,5 +1177,80 @@ fun SettingsScreen(settingsManager: SettingsManager) {
                 )
             }
         }
+
+        Spacer(modifier = Modifier.height(32.dp))
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+        Spacer(modifier = Modifier.height(16.dp))
+
+        Text(
+            text = "About",
+            style = MaterialTheme.typography.titleLarge,
+            modifier = Modifier.padding(bottom = 16.dp)
+        )
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = MaterialTheme.shapes.extraLarge,
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
+            border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text("H-filter is an open-source project dedicated to providing a cleaner and safer browsing experience on Android.", style = MaterialTheme.typography.bodyMedium)
+                Spacer(modifier = Modifier.height(16.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.clickable {
+                        val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://github.com/deivid22srk/H-filter"))
+                        context.startActivity(intent)
+                    }
+                ) {
+                    Icon(Icons.Default.Code, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Text(
+                        "Source Code on GitHub",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Text("https://github.com/deivid22srk/H-filter", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+    }
+
+    if (showDnsDialog) {
+        AlertDialog(
+            onDismissRequest = { showDnsDialog = false },
+            title = { Text("Add DNS Server") },
+            text = {
+                TextField(
+                    value = newDnsIp,
+                    onValueChange = { newDnsIp = it },
+                    label = { Text("IP Address (e.g. 1.1.1.1)") },
+                    singleLine = true
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    if (newDnsIp.isNotBlank()) {
+                        scope.launch {
+                            settingsManager.saveDnsServers(dnsServers + newDnsIp.trim())
+                            newDnsIp = ""
+                            showDnsDialog = false
+                        }
+                    }
+                }) {
+                    Text("Add")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDnsDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 }
