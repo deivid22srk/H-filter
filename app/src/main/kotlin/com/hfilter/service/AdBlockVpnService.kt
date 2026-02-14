@@ -68,65 +68,76 @@ class AdBlockVpnService : VpnService() {
             serviceScope.launch {
                 settingsManager.setVpnEnabled(true)
             }
+            val notification = createNotification()
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                startForeground(NOTIFICATION_ID, createNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
             } else {
-                startForeground(NOTIFICATION_ID, createNotification())
+                startForeground(NOTIFICATION_ID, notification)
             }
             executor.execute {
                 runVpn()
             }
+        } else {
+            // Force interface recreation to pick up potential changes (e.g. app capture session)
+            vpnInterface?.close()
+            vpnInterface = null
         }
         return START_STICKY
     }
 
     private fun runVpn() {
-        try {
-            val builder = Builder()
-                .setSession("H-filter")
-                .addAddress("10.0.0.1", 24)
-                .addDnsServer("8.8.8.8")
-                .addRoute("8.8.8.8", 32)
-                .addRoute("8.8.4.4", 32)
-                .addRoute("1.1.1.1", 32)
+        while (isRunning) {
+            try {
+                val builder = Builder()
+                    .setSession("H-filter")
+                    .addAddress("10.0.0.1", 24)
+                    .addDnsServer("8.8.8.8")
+                    .addRoute("8.8.8.8", 32)
+                    .addRoute("8.8.4.4", 32)
+                    .addRoute("1.1.1.1", 32)
 
-            val captureApps = runBlocking { settingsManager.captureSessionApps.first() }
-            isCaptureMode = captureApps.isNotEmpty()
+                val captureApps = runBlocking { settingsManager.captureSessionApps.first() }
+                isCaptureMode = captureApps.isNotEmpty()
 
-            if (isCaptureMode) {
-                captureApps.forEach {
-                    try {
-                        builder.addAllowedApplication(it)
-                    } catch (e: Exception) {
-                        Log.e("AdBlockVpn", "Failed to add allowed app: $it", e)
+                if (isCaptureMode) {
+                    captureApps.forEach {
+                        try {
+                            builder.addAllowedApplication(it)
+                        } catch (e: Exception) {
+                            Log.e("AdBlockVpn", "Failed to add allowed app: $it", e)
+                        }
                     }
                 }
-            }
 
-            vpnInterface = builder.establish()
-            if (vpnInterface == null) {
-                stopVpn()
-                return
-            }
-
-            val input = FileInputStream(vpnInterface?.fileDescriptor)
-            val output = FileOutputStream(vpnInterface?.fileDescriptor)
-
-            val buffer = ByteBuffer.allocate(32767)
-
-            while (isRunning) {
-                val length = input.read(buffer.array())
-                if (length > 0) {
-                    buffer.limit(length)
-                    processPacket(buffer, output)
-                    buffer.clear()
+                vpnInterface = builder.establish()
+                if (vpnInterface == null) {
+                    isRunning = false
+                    break
                 }
+
+                val input = FileInputStream(vpnInterface?.fileDescriptor)
+                val output = FileOutputStream(vpnInterface?.fileDescriptor)
+                val buffer = ByteBuffer.allocate(32767)
+
+                while (isRunning && vpnInterface != null) {
+                    val length = try { input.read(buffer.array()) } catch (e: Exception) { -1 }
+                    if (length > 0) {
+                        buffer.limit(length)
+                        processPacket(buffer, output)
+                        buffer.clear()
+                    } else if (length < 0) {
+                        break
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("AdBlockVpn", "Error in VPN loop", e)
+                if (isRunning) Thread.sleep(1000)
+            } finally {
+                vpnInterface?.close()
+                vpnInterface = null
             }
-        } catch (e: Exception) {
-            Log.e("AdBlockVpn", "Error in VPN loop", e)
-        } finally {
-            stopVpn()
         }
+        stopVpn()
     }
 
     private fun processPacket(buffer: ByteBuffer, output: FileOutputStream) {

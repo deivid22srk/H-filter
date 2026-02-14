@@ -9,6 +9,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.foundation.lazy.LazyColumn
@@ -21,8 +22,10 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.core.graphics.drawable.toBitmap
 import androidx.lifecycle.lifecycleScope
@@ -193,6 +196,12 @@ fun MainApp(
                 NavigationBarItem(
                     selected = selectedTab == 2,
                     onClick = { selectedTab = 2 },
+                    icon = { Icon(Icons.Default.Apps, contentDescription = null) },
+                    label = { Text("Apps") }
+                )
+                NavigationBarItem(
+                    selected = selectedTab == 3,
+                    onClick = { selectedTab = 3 },
                     icon = { Icon(Icons.Default.Settings, contentDescription = null) },
                     label = { Text("Settings") }
                 )
@@ -207,7 +216,7 @@ fun MainApp(
                 0 -> HomeScreen(hostManager, vpnActive, onVpnToggle, onShowLogs = { showDnsLogs = true })
                 1 -> {
                     val predefinitions by settingsManager.appPredefinitions.collectAsState(initial = emptyList())
-                    HostsScreen(settingsManager, hostSources, downloadProgress, onAdd = { name, url ->
+                    HostsScreen(hostSources, downloadProgress, onAdd = { name, url ->
                         scope.launch {
                             val newList = hostSources + HostSource(name = name, url = url)
                             settingsManager.saveHostSources(newList)
@@ -238,9 +247,15 @@ fun MainApp(
                             val fullList = hostSources + newSources
                             hostManager.reload(fullList, predefinitions, forceDownload = true)
                         }
-                }, onAppFilterExport = onExport, onAppFilterImport = onImport)
+                    })
                 }
-                2 -> SettingsScreen(settingsManager)
+                2 -> AppFilterScreen(
+                    settingsManager,
+                    onExport = onExport,
+                    onImport = onImport,
+                    onVpnToggle = onVpnToggle
+                )
+                3 -> SettingsScreen(settingsManager)
             }
             }
         }
@@ -410,45 +425,51 @@ fun HomeScreen(hostManager: HostManager, vpnActive: Boolean, onVpnToggle: (Boole
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(16.dp),
+            .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
+        verticalArrangement = Arrangement.spacedBy(24.dp, Alignment.CenterVertically)
     ) {
         ElevatedCard(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = 48.dp),
+            modifier = Modifier.fillMaxWidth(),
             shape = MaterialTheme.shapes.extraLarge,
             colors = CardDefaults.elevatedCardColors(
                 containerColor = if (vpnActive) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant
             )
         ) {
-            Column(modifier = Modifier.padding(24.dp)) {
+            Column(modifier = Modifier.padding(28.dp)) {
                 Text(
-                    text = "Status",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = if (vpnActive) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+                    text = "SHIELD STATUS",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = if (vpnActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+                    letterSpacing = 1.5.sp
                 )
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(16.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
                         if (vpnActive) Icons.Default.Shield else Icons.Default.ShieldMoon,
                         contentDescription = null,
-                        modifier = Modifier.size(32.dp),
+                        modifier = Modifier.size(40.dp),
                         tint = if (vpnActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
                     )
-                    Spacer(modifier = Modifier.width(16.dp))
+                    Spacer(modifier = Modifier.width(20.dp))
                     Text(
-                        text = if (vpnActive) "Protection Active" else "Protection Paused",
-                        style = MaterialTheme.typography.headlineSmall,
+                        text = if (vpnActive) "Protected" else "Unprotected",
+                        style = MaterialTheme.typography.headlineMedium,
                         color = if (vpnActive) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(24.dp))
+                HorizontalDivider(color = if (vpnActive) MaterialTheme.colorScheme.onPrimaryContainer.copy(0.1f) else MaterialTheme.colorScheme.onSurfaceVariant.copy(0.1f))
+                Spacer(modifier = Modifier.height(24.dp))
                 Text(
-                    text = "$blockedCount domains in blocklist",
+                    text = "$blockedCount",
+                    style = MaterialTheme.typography.displaySmall,
+                    color = if (vpnActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = "Domains currently blocked",
                     style = MaterialTheme.typography.bodyMedium,
-                    color = if (vpnActive) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+                    color = if (vpnActive) MaterialTheme.colorScheme.onPrimaryContainer.copy(0.7f) else MaterialTheme.colorScheme.onSurfaceVariant.copy(0.7f)
                 )
             }
         }
@@ -490,16 +511,13 @@ fun HomeScreen(hostManager: HostManager, vpnActive: Boolean, onVpnToggle: (Boole
 
 @Composable
 fun HostsScreen(
-    settingsManager: SettingsManager,
     sources: List<HostSource>,
     downloadProgress: Float?,
     onAdd: (String, String) -> Unit,
     onAddSelected: (List<FilterItem>) -> Unit,
     onToggle: (HostSource) -> Unit,
     onDelete: (HostSource) -> Unit,
-    onReload: () -> Unit,
-    onAppFilterExport: () -> Unit,
-    onAppFilterImport: () -> Unit
+    onReload: () -> Unit
 ) {
     var subTab by remember { mutableIntStateOf(0) }
     var showDialog by remember { mutableStateOf(false) }
@@ -517,7 +535,6 @@ fun HostsScreen(
         TabRow(selectedTabIndex = subTab) {
             Tab(selected = subTab == 0, onClick = { subTab = 0 }, text = { Text("My Hosts") })
             Tab(selected = subTab == 1, onClick = { subTab = 1 }, text = { Text("Explore") })
-            Tab(selected = subTab == 2, onClick = { subTab = 2 }, text = { Text("App Filters") })
         }
 
         if (subTab == 0) {
@@ -542,20 +559,22 @@ fun HostsScreen(
                     Card(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 4.dp),
+                            .padding(horizontal = 16.dp, vertical = 6.dp),
+                        shape = MaterialTheme.shapes.large,
                         colors = CardDefaults.cardColors(
-                            containerColor = if (source.enabled) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.surface
-                        )
+                            containerColor = if (source.enabled) MaterialTheme.colorScheme.surfaceColorAtElevation(1.dp) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                        ),
+                        border = if (source.enabled) null else androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
                     ) {
                         ListItem(
-                            headlineContent = { Text(source.name, style = MaterialTheme.typography.titleMedium) },
-                            supportingContent = { Text(source.url, maxLines = 1, style = MaterialTheme.typography.bodySmall) },
+                            headlineContent = { Text(source.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold) },
+                            supportingContent = { Text(source.url, maxLines = 1, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) },
                             trailingContent = {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Switch(checked = source.enabled, onCheckedChange = { onToggle(source) })
                                     if (source.type == com.hfilter.model.SourceType.USER) {
                                         IconButton(onClick = { onDelete(source) }) {
-                                            Icon(Icons.Default.Delete, contentDescription = null)
+                                            Icon(Icons.Default.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error)
                                         }
                                     }
                                 }
@@ -565,14 +584,12 @@ fun HostsScreen(
                     }
                 }
             }
-        } else if (subTab == 1) {
+        } else {
             ExploreFiltersScreen(
                 onAdd = onAdd,
                 onAddSelected = onAddSelected,
                 alreadyAddedUrls = sources.map { it.url }.toSet()
             )
-        } else {
-            AppFilterScreen(settingsManager, onExport = onAppFilterExport, onImport = onAppFilterImport)
         }
     }
 
@@ -623,7 +640,8 @@ fun HostsScreen(
 fun AppFilterScreen(
     settingsManager: SettingsManager,
     onExport: () -> Unit,
-    onImport: () -> Unit
+    onImport: () -> Unit,
+    onVpnToggle: (Boolean) -> Unit
 ) {
     val predefinitions by settingsManager.appPredefinitions.collectAsState(initial = emptyList())
     val captureApps by settingsManager.captureSessionApps.collectAsState(initial = emptyList())
@@ -631,6 +649,7 @@ fun AppFilterScreen(
     val scope = rememberCoroutineScope()
     var showAppSelection by remember { mutableStateOf(false) }
     var showReview by remember { mutableStateOf(false) }
+    var editingPredefinition by remember { mutableStateOf<AppPredefinition?>(null) }
 
     if (showAppSelection) {
         AppSelectionScreen(
@@ -639,7 +658,27 @@ fun AppFilterScreen(
                 scope.launch {
                     settingsManager.setCaptureSessionApps(apps)
                     LogManager.clearSessionLogs()
+                    onVpnToggle(true)
                     showAppSelection = false
+                }
+            }
+        )
+    } else if (editingPredefinition != null) {
+        ReviewCaptureScreen(
+            domains = editingPredefinition!!.blockedDomains + editingPredefinition!!.allowedDomains,
+            initialName = editingPredefinition!!.name,
+            initialBlocked = editingPredefinition!!.blockedDomains,
+            initialAllowed = editingPredefinition!!.allowedDomains,
+            onBack = { editingPredefinition = null },
+            onSave = { name, blocked, allowed ->
+                scope.launch {
+                    val updated = editingPredefinition!!.copy(
+                        name = name,
+                        blockedDomains = blocked,
+                        allowedDomains = allowed
+                    )
+                    settingsManager.saveAppPredefinitions(predefinitions.map { if (it.id == updated.id) updated else it })
+                    editingPredefinition = null
                 }
             }
         )
@@ -708,12 +747,17 @@ fun AppFilterScreen(
                         headlineContent = { Text(pred.name) },
                         supportingContent = { Text("${pred.packageNames.size} apps, ${pred.blockedDomains.size} blocked") },
                         trailingContent = {
-                            IconButton(onClick = {
-                                scope.launch {
-                                    settingsManager.saveAppPredefinitions(predefinitions.filter { it.id != pred.id })
+                            Row {
+                                IconButton(onClick = { editingPredefinition = pred }) {
+                                    Icon(Icons.Default.Edit, contentDescription = "Edit")
                                 }
-                            }) {
-                                Icon(Icons.Default.Delete, contentDescription = null)
+                                IconButton(onClick = {
+                                    scope.launch {
+                                        settingsManager.saveAppPredefinitions(predefinitions.filter { it.id != pred.id })
+                                    }
+                                }) {
+                                    Icon(Icons.Default.Delete, contentDescription = "Delete")
+                                }
                             }
                         }
                     )
@@ -728,8 +772,11 @@ fun AppSelectionScreen(onBack: () -> Unit, onStartCapture: (List<String>) -> Uni
     val context = LocalContext.current
     val pm = context.packageManager
     val apps = remember {
-        pm.getInstalledApplications(PackageManager.GET_META_DATA)
-            .filter { (it.flags and ApplicationInfo.FLAG_SYSTEM) == 0 }
+        val mainIntent = Intent(Intent.ACTION_MAIN, null)
+        mainIntent.addCategory(Intent.CATEGORY_LAUNCHER)
+        pm.queryIntentActivities(mainIntent, 0)
+            .map { it.activityInfo.applicationInfo }
+            .distinctBy { it.packageName }
             .map { AppInfo(it.packageName, it.loadLabel(pm).toString()) }
             .sortedBy { it.name }
     }
@@ -747,15 +794,28 @@ fun AppSelectionScreen(onBack: () -> Unit, onStartCapture: (List<String>) -> Uni
         LazyColumn(modifier = Modifier.weight(1f)) {
             items(apps) { app ->
                 ListItem(
-                    headlineContent = { Text(app.name) },
-                    supportingContent = { Text(app.packageName) },
+                    headlineContent = { Text(app.name, fontWeight = FontWeight.Medium) },
+                    supportingContent = { Text(app.packageName, style = MaterialTheme.typography.bodySmall) },
                     leadingContent = {
-                        Checkbox(
-                            checked = selectedApps.contains(app.packageName),
-                            onCheckedChange = {
-                                if (it) selectedApps.add(app.packageName) else selectedApps.remove(app.packageName)
-                            }
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(
+                                checked = selectedApps.contains(app.packageName),
+                                onCheckedChange = {
+                                    if (it) selectedApps.add(app.packageName) else selectedApps.remove(app.packageName)
+                                }
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            val icon = remember { pm.getApplicationIcon(app.packageName).toBitmap().asImageBitmap() }
+                            androidx.compose.foundation.Image(
+                                bitmap = icon,
+                                contentDescription = null,
+                                modifier = Modifier.size(40.dp)
+                            )
+                        }
+                    },
+                    modifier = Modifier.clickable {
+                        if (selectedApps.contains(app.packageName)) selectedApps.remove(app.packageName)
+                        else selectedApps.add(app.packageName)
                     }
                 )
             }
@@ -774,12 +834,15 @@ fun AppSelectionScreen(onBack: () -> Unit, onStartCapture: (List<String>) -> Uni
 @Composable
 fun ReviewCaptureScreen(
     domains: Set<String>,
+    initialName: String = "",
+    initialBlocked: Set<String> = emptySet(),
+    initialAllowed: Set<String> = emptySet(),
     onBack: () -> Unit,
     onSave: (String, Set<String>, Set<String>) -> Unit
 ) {
-    var name by remember { mutableStateOf("") }
-    val blocked = remember { mutableStateListOf<String>() }
-    val allowed = remember { mutableStateListOf<String>() }
+    var name by remember { mutableStateOf(initialName) }
+    val blocked = remember { mutableStateListOf<String>().apply { addAll(initialBlocked) } }
+    val allowed = remember { mutableStateListOf<String>().apply { addAll(initialAllowed) } }
     val domainList = remember { domains.toList().sorted() }
 
     Column(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
@@ -798,38 +861,59 @@ fun ReviewCaptureScreen(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
         )
 
-        LazyColumn(modifier = Modifier.weight(1f)) {
+        LazyColumn(
+            modifier = Modifier.weight(1f),
+            contentPadding = PaddingValues(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
             items(domainList) { domain ->
-                ListItem(
-                    headlineContent = { Text(domain) },
-                    trailingContent = {
-                        Row {
-                            FilterChip(
-                                selected = blocked.contains(domain),
-                                onClick = {
-                                    if (blocked.contains(domain)) blocked.remove(domain)
-                                    else {
-                                        blocked.add(domain)
-                                        allowed.remove(domain)
-                                    }
-                                },
-                                label = { Text("Block") }
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            FilterChip(
-                                selected = allowed.contains(domain),
-                                onClick = {
-                                    if (allowed.contains(domain)) allowed.remove(domain)
-                                    else {
-                                        allowed.add(domain)
-                                        blocked.remove(domain)
-                                    }
-                                },
-                                label = { Text("Allow") }
-                            )
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = MaterialTheme.shapes.medium,
+                    colors = CardDefaults.cardColors(
+                        containerColor = when {
+                            blocked.contains(domain) -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.2f)
+                            allowed.contains(domain) -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.2f)
+                            else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
                         }
-                    }
-                )
+                    )
+                ) {
+                    ListItem(
+                        headlineContent = { Text(domain, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium) },
+                        trailingContent = {
+                            Row {
+                                FilterChip(
+                                    selected = blocked.contains(domain),
+                                    onClick = {
+                                        if (blocked.contains(domain)) blocked.remove(domain)
+                                        else {
+                                            blocked.add(domain)
+                                            allowed.remove(domain)
+                                        }
+                                    },
+                                    label = { Text("Block") },
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = MaterialTheme.colorScheme.error,
+                                        selectedLabelColor = MaterialTheme.colorScheme.onError
+                                    )
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                FilterChip(
+                                    selected = allowed.contains(domain),
+                                    onClick = {
+                                        if (allowed.contains(domain)) allowed.remove(domain)
+                                        else {
+                                            allowed.add(domain)
+                                            blocked.remove(domain)
+                                        }
+                                    },
+                                    label = { Text("Allow") }
+                                )
+                            }
+                        },
+                        colors = ListItemDefaults.colors(containerColor = androidx.compose.ui.graphics.Color.Transparent)
+                    )
+                }
             }
         }
 
@@ -862,29 +946,33 @@ fun SettingsScreen(settingsManager: SettingsManager) {
 
         Card(
             modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+            shape = MaterialTheme.shapes.extraLarge,
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
+            border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
         ) {
             Column {
                 ListItem(
-                    headlineContent = { Text("Auto-update on Start") },
-                    supportingContent = { Text("Download hosts every time the app opens") },
+                    headlineContent = { Text("Auto-update on Start", fontWeight = FontWeight.SemiBold) },
+                    supportingContent = { Text("Synchronize all host lists on every app launch") },
                     trailingContent = {
                         Switch(
                             checked = autoUpdate,
                             onCheckedChange = { scope.launch { settingsManager.setAutoUpdate(it) } }
                         )
-                    }
+                    },
+                    colors = ListItemDefaults.colors(containerColor = androidx.compose.ui.graphics.Color.Transparent)
                 )
-                HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                HorizontalDivider(modifier = Modifier.padding(horizontal = 24.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
                 ListItem(
-                    headlineContent = { Text("Start on Boot") },
-                    supportingContent = { Text("Start VPN service when device boots") },
+                    headlineContent = { Text("Start on Boot", fontWeight = FontWeight.SemiBold) },
+                    supportingContent = { Text("Automatically resume ad-blocking after system restart") },
                     trailingContent = {
                         Switch(
                             checked = startOnBoot,
                             onCheckedChange = { scope.launch { settingsManager.setStartOnBoot(it) } }
                         )
-                    }
+                    },
+                    colors = ListItemDefaults.colors(containerColor = androidx.compose.ui.graphics.Color.Transparent)
                 )
             }
         }
