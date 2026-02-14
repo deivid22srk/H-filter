@@ -8,5 +8,6 @@ data class AppPredefinition(
     val packageNames: List<String>,
     val blockedDomains: Set<String> = emptySet(),
     val allowedDomains: Set<String> = emptySet(),
-    val enabled: Boolean = true
+    val enabled: Boolean = true,
+    val blockInternet: Boolean = false
 )

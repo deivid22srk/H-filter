@@ -33,6 +33,7 @@ class AdBlockVpnService : VpnService() {
     private val executor = Executors.newFixedThreadPool(15)
     private var isRunning = false
     private var isCaptureMode = false
+    private var isBlockingInternet = false
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     companion object {
@@ -47,15 +48,18 @@ class AdBlockVpnService : VpnService() {
 
         serviceScope.launch {
             hostManager.loadFromCache()
-            // Observe host sources, app predefinitions, and filtering mode changes
+            // Observe host sources, app predefinitions, filtering mode, and capture block session changes
             combine(
                 settingsManager.hostSources,
                 settingsManager.appPredefinitions,
-                settingsManager.filteringMode
-            ) { sources, preds, mode ->
+                settingsManager.filteringMode,
+                settingsManager.captureSessionBlockInternet
+            ) { sources, preds, mode, _ ->
                 Triple(sources, preds, mode)
             }.collect { (sources, preds, mode) ->
                 hostManager.reload(sources, preds, mode, forceDownload = false)
+                // If we are running, the UI or logic might have triggered a restart of the VPN
+                // to apply new routes (via onStartCommand)
             }
         }
         createNotificationChannel()
@@ -101,23 +105,36 @@ class AdBlockVpnService : VpnService() {
                     .addRoute("1.1.1.1", 32)
 
                 val captureApps = runBlocking { settingsManager.captureSessionApps.first() }
+                val captureBlock = runBlocking { settingsManager.captureSessionBlockInternet.first() }
                 val currentMode = runBlocking { settingsManager.filteringMode.first() }
                 val predefinitions = runBlocking { settingsManager.appPredefinitions.first() }
 
                 isCaptureMode = captureApps.isNotEmpty()
+                val allAppPackages = predefinitions.filter { it.enabled }.flatMap { it.packageNames }.toSet()
+                val blockedApps = predefinitions.filter { it.enabled && it.blockInternet }.flatMap { it.packageNames }.toSet()
+
+                isBlockingInternet = captureBlock || blockedApps.isNotEmpty()
 
                 if (isCaptureMode) {
                     captureApps.forEach {
                         try { builder.addAllowedApplication(it) } catch (e: Exception) { Log.e("AdBlockVpn", "Failed to add allowed app: $it", e) }
                     }
-                } else if (currentMode == com.hfilter.model.FilteringMode.APPS) {
-                    // If only filtering for apps, only include apps that have predefinitions
-                    val appPackages = predefinitions.filter { it.enabled }.flatMap { it.packageNames }.toSet()
-                    if (appPackages.isNotEmpty()) {
-                        appPackages.forEach {
+                } else if (currentMode == com.hfilter.model.FilteringMode.APPS || currentMode == com.hfilter.model.FilteringMode.BOTH) {
+                    if (allAppPackages.isNotEmpty()) {
+                        allAppPackages.forEach {
                             try { builder.addAllowedApplication(it) } catch (e: Exception) { Log.e("AdBlockVpn", "Failed to add app $it", e) }
                         }
                     }
+                } else if (blockedApps.isNotEmpty()) {
+                    // In GLOBAL mode, but some apps are blocked. We MUST add them to block them.
+                    blockedApps.forEach {
+                        try { builder.addAllowedApplication(it) } catch (e: Exception) { Log.e("AdBlockVpn", "Failed to add blocked app: $it", e) }
+                    }
+                }
+
+                if (isBlockingInternet) {
+                    builder.addRoute("0.0.0.0", 0)
+                    builder.addRoute("::", 0)
                 }
 
                 vpnInterface = builder.establish()

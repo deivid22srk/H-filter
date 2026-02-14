@@ -664,9 +664,10 @@ fun AppFilterScreen(
     if (showAppSelection) {
         AppSelectionScreen(
             onBack = { showAppSelection = false },
-            onStartCapture = { apps ->
+            onStartCapture = { apps, blockInternet ->
                 scope.launch {
                     settingsManager.setCaptureSessionApps(apps)
+                    settingsManager.setCaptureSessionBlockInternet(blockInternet)
                     LogManager.clearSessionLogs()
                     onVpnToggle(true)
                     showAppSelection = false
@@ -679,13 +680,15 @@ fun AppFilterScreen(
             initialName = editingPredefinition!!.name,
             initialBlocked = editingPredefinition!!.blockedDomains,
             initialAllowed = editingPredefinition!!.allowedDomains,
+            initialBlockInternet = editingPredefinition!!.blockInternet,
             onBack = { editingPredefinition = null },
-            onSave = { name, blocked, allowed ->
+            onSave = { name, blocked, allowed, blockInternet ->
                 scope.launch {
                     val updated = editingPredefinition!!.copy(
                         name = name,
                         blockedDomains = blocked,
-                        allowedDomains = allowed
+                        allowedDomains = allowed,
+                        blockInternet = blockInternet
                     )
                     settingsManager.saveAppPredefinitions(predefinitions.map { if (it.id == updated.id) updated else it })
                     editingPredefinition = null
@@ -693,6 +696,7 @@ fun AppFilterScreen(
             }
         )
     } else if (showReview) {
+        val sessionBlockInternet by settingsManager.captureSessionBlockInternet.collectAsState(initial = false)
         ReviewCaptureScreen(
             domains = if (recapturingPredefinition != null) {
                 sessionLogs + recapturingPredefinition!!.blockedDomains + recapturingPredefinition!!.allowedDomains
@@ -700,14 +704,16 @@ fun AppFilterScreen(
             initialName = recapturingPredefinition?.name ?: "",
             initialBlocked = recapturingPredefinition?.blockedDomains ?: emptySet(),
             initialAllowed = recapturingPredefinition?.allowedDomains ?: emptySet(),
+            initialBlockInternet = recapturingPredefinition?.blockInternet ?: sessionBlockInternet,
             onBack = { showReview = false },
-            onSave = { name, blocked, allowed ->
+            onSave = { name, blocked, allowed, blockInternet ->
                 scope.launch {
                     if (recapturingPredefinition != null) {
                         val updated = recapturingPredefinition!!.copy(
                             name = name,
                             blockedDomains = blocked,
-                            allowedDomains = allowed
+                            allowedDomains = allowed,
+                            blockInternet = blockInternet
                         )
                         settingsManager.saveAppPredefinitions(predefinitions.map { if (it.id == updated.id) updated else it })
                     } else {
@@ -715,11 +721,13 @@ fun AppFilterScreen(
                             name = name,
                             packageNames = captureApps,
                             blockedDomains = blocked,
-                            allowedDomains = allowed
+                            allowedDomains = allowed,
+                            blockInternet = blockInternet
                         )
                         settingsManager.saveAppPredefinitions(predefinitions + newPred)
                     }
                     settingsManager.setCaptureSessionApps(emptyList())
+                    settingsManager.setCaptureSessionBlockInternet(false)
                     LogManager.clearSessionLogs()
                     recapturingPredefinition = null
                     showReview = false
@@ -769,8 +777,23 @@ fun AppFilterScreen(
             LazyColumn(modifier = Modifier.weight(1f)) {
                 items(predefinitions) { pred ->
                     ListItem(
-                        headlineContent = { Text(pred.name, fontWeight = FontWeight.SemiBold) },
-                        supportingContent = { Text("${pred.packageNames.size} apps, ${pred.blockedDomains.size} blocked") },
+                        headlineContent = {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(pred.name, fontWeight = FontWeight.SemiBold)
+                                if (pred.blockInternet) {
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Icon(
+                                        Icons.Default.Block,
+                                        contentDescription = "Internet Blocked",
+                                        tint = MaterialTheme.colorScheme.error,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
+                        },
+                        supportingContent = {
+                            Text("${pred.packageNames.size} apps, ${pred.blockedDomains.size} blocked${if (pred.blockInternet) ", internet blocked" else ""}")
+                        },
                         leadingContent = {
                             if (pred.packageNames.isNotEmpty()) {
                                 val icon = remember(pred.packageNames[0]) {
@@ -821,7 +844,7 @@ fun AppFilterScreen(
 }
 
 @Composable
-fun AppSelectionScreen(onBack: () -> Unit, onStartCapture: (List<String>) -> Unit) {
+fun AppSelectionScreen(onBack: () -> Unit, onStartCapture: (List<String>, Boolean) -> Unit) {
     val context = LocalContext.current
     val pm = context.packageManager
     val apps = remember {
@@ -834,6 +857,7 @@ fun AppSelectionScreen(onBack: () -> Unit, onStartCapture: (List<String>) -> Uni
             .sortedBy { it.name }
     }
     val selectedApps = remember { mutableStateListOf<String>() }
+    var blockInternet by remember { mutableStateOf(false) }
 
     Column(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
         Row(
@@ -842,6 +866,20 @@ fun AppSelectionScreen(onBack: () -> Unit, onStartCapture: (List<String>) -> Uni
         ) {
             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, null) }
             Text("Select Apps to Capture", style = MaterialTheme.typography.titleLarge)
+        }
+
+        Card(
+            modifier = Modifier.padding(16.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+        ) {
+            ListItem(
+                headlineContent = { Text("Block Internet", fontWeight = FontWeight.SemiBold) },
+                supportingContent = { Text("Block all non-DNS traffic for selected apps") },
+                trailingContent = {
+                    Switch(checked = blockInternet, onCheckedChange = { blockInternet = it })
+                },
+                colors = ListItemDefaults.colors(containerColor = androidx.compose.ui.graphics.Color.Transparent)
+            )
         }
 
         LazyColumn(modifier = Modifier.weight(1f)) {
@@ -875,11 +913,11 @@ fun AppSelectionScreen(onBack: () -> Unit, onStartCapture: (List<String>) -> Uni
         }
 
         Button(
-            onClick = { onStartCapture(selectedApps.toList()) },
+            onClick = { onStartCapture(selectedApps.toList(), blockInternet) },
             enabled = selectedApps.isNotEmpty(),
             modifier = Modifier.fillMaxWidth().padding(16.dp)
         ) {
-            Text("Start Capture")
+            Text(if (blockInternet) "Start Blocked Capture" else "Start Capture")
         }
     }
 }
@@ -890,10 +928,12 @@ fun ReviewCaptureScreen(
     initialName: String = "",
     initialBlocked: Set<String> = emptySet(),
     initialAllowed: Set<String> = emptySet(),
+    initialBlockInternet: Boolean = false,
     onBack: () -> Unit,
-    onSave: (String, Set<String>, Set<String>) -> Unit
+    onSave: (String, Set<String>, Set<String>, Boolean) -> Unit
 ) {
     var name by remember { mutableStateOf(initialName) }
+    var blockInternet by remember { mutableStateOf(initialBlockInternet) }
     val blocked = remember { mutableStateListOf<String>().apply { addAll(initialBlocked) } }
     val allowed = remember { mutableStateListOf<String>().apply { addAll(initialAllowed) } }
     val domainList = remember { domains.toList().sorted() }
@@ -912,6 +952,14 @@ fun ReviewCaptureScreen(
             onValueChange = { name = it },
             label = { Text("Predefinition Name") },
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
+        )
+
+        ListItem(
+            headlineContent = { Text("Block Internet") },
+            supportingContent = { Text("Drop all non-DNS traffic for this predefinition") },
+            trailingContent = {
+                Switch(checked = blockInternet, onCheckedChange = { blockInternet = it })
+            }
         )
 
         LazyColumn(
@@ -971,7 +1019,7 @@ fun ReviewCaptureScreen(
         }
 
         Button(
-            onClick = { onSave(name, blocked.toSet(), allowed.toSet()) },
+            onClick = { onSave(name, blocked.toSet(), allowed.toSet(), blockInternet) },
             enabled = name.isNotBlank(),
             modifier = Modifier.fillMaxWidth().padding(16.dp)
         ) {
